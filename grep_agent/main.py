@@ -16,7 +16,7 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from utils.logging import get_logger
-from grep.agent import DocumentSearchAgent
+from .agent import DocumentSearchAgent
 
 logger = get_logger(__name__)
 

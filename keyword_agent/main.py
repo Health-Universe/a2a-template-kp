@@ -16,10 +16,7 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from utils.logging import get_logger
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent))
-from agent import KeywordGeneratorAgent
+from .agent import KeywordGeneratorAgent
 
 logger = get_logger(__name__)
 

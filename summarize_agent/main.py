@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for the Document Processing Pipeline Orchestrator.
+Main entry point for the Document Summarizer Agent.
 Starts an A2A-compliant HTTP server with all required endpoints.
 """
 
@@ -16,17 +16,14 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from utils.logging import get_logger
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent))
-from agent import DocumentProcessingOrchestratorAgent
+from .agent import DocumentSummarizerAgent
 
 logger = get_logger(__name__)
 
 def create_app():
     """Create the Starlette application with A2A endpoints."""
     # Instantiate the agent
-    agent = DocumentProcessingOrchestratorAgent()
+    agent = DocumentSummarizerAgent()
     logger.info(f"Initializing {agent.get_agent_name()} v{agent.get_agent_version()}")
     
     # Build Agent Card + handler
@@ -50,7 +47,7 @@ app, agent = create_app()
 
 if __name__ == "__main__":
     # Configuration from environment
-    port = int(os.getenv("PORT", "8006"))
+    port = int(os.getenv("PORT", "8005"))
     host = os.getenv("HOST", "0.0.0.0")
     reload = os.getenv("RELOAD", "false").lower() == "true"
     
@@ -63,17 +60,21 @@ if __name__ == "__main__":
     logger.info(f"   A2A Sync:   http://localhost:{port}/a2a/v1/message/sync")
     logger.info(f"   Health:     http://localhost:{port}/health")
     logger.info("=" * 60)
-    logger.info("🔗 Pipeline Agents:")
-    logger.info(f"   Keyword:   {agent.keyword_agent}")
-    logger.info(f"   Grep:      {agent.grep_agent}")
-    logger.info(f"   Chunk:     {agent.chunk_agent}")
-    logger.info(f"   Summarize: {agent.summarizer_agent}")
+    logger.info("📝 Capabilities:")
+    logger.info("   - LLM-powered intelligent summarization")
+    logger.info("   - Clinical summary style optimization")
+    logger.info("   - Key information extraction")
+    logger.info("   - Medical context preservation")
+    logger.info("   - Structured output generation")
     logger.info("=" * 60)
-    logger.info("⚙️  Configuration:")
-    logger.info(f"   Max Patterns:     {agent.MAX_PATTERNS}")
-    logger.info(f"   Max Chunks:       {agent.MAX_MATCHES_FOR_CHUNKS}")
-    logger.info(f"   Context Lines:    {agent.LINES_BEFORE} before, {agent.LINES_AFTER} after")
-    logger.info(f"   Timeout:          {agent.CALL_TIMEOUT_SEC}s per agent call")
+    logger.info("Example usage:")
+    logger.info(f'  curl -X POST http://localhost:{port}/a2a/v1/message/sync \\')
+    logger.info('    -H "Content-Type: application/json" \\')
+    logger.info('    -d \'{"message": {"role": "user", "parts": [{"kind": "data", "data": {')
+    logger.info('      "chunk_content": "Patient diagnosed with diabetes type 2...",')
+    logger.info('      "chunk_metadata": {"source": "pipeline_analysis", "total_matches": 3},')
+    logger.info('      "summary_style": "clinical"')
+    logger.info('    }}]}}\'')
     logger.info("=" * 60)
     
     # Run the server

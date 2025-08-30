@@ -24,15 +24,24 @@ def run_agent(agent_name: str, port: int = None):
         print(f"Error: Invalid agent '{agent_name}'. Must be one of: {valid_agents}")
         sys.exit(1)
     
+    # Map agent names to directory names
+    agent_dirs = {
+        "keyword": "keyword_agent",
+        "grep": "grep_agent", 
+        "chunk": "chunk_agent",
+        "summarize": "summarize_agent",
+        "orchestrator": "orchestrator_agent"
+    }
+    
     # Get the agent directory
     current_dir = Path(__file__).parent
-    agent_dir = current_dir / agent_name
+    agent_dir = current_dir / agent_dirs[agent_name]
     
     if not agent_dir.exists():
         print(f"Error: Agent directory '{agent_dir}' does not exist")
         sys.exit(1)
     
-    # Default ports for each agent
+    # Default ports for each agent  
     default_ports = {
         "keyword": 8002,
         "grep": 8003,

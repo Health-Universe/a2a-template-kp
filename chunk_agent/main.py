@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for the Document Summarizer Agent.
+Main entry point for the Content Chunk Extractor Agent.
 Starts an A2A-compliant HTTP server with all required endpoints.
 """
 
@@ -16,17 +16,14 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from utils.logging import get_logger
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent))
-from agent import DocumentSummarizerAgent
+from .agent import ChunkExtractionAgent
 
 logger = get_logger(__name__)
 
 def create_app():
     """Create the Starlette application with A2A endpoints."""
     # Instantiate the agent
-    agent = DocumentSummarizerAgent()
+    agent = ChunkExtractionAgent()
     logger.info(f"Initializing {agent.get_agent_name()} v{agent.get_agent_version()}")
     
     # Build Agent Card + handler
@@ -50,7 +47,7 @@ app, agent = create_app()
 
 if __name__ == "__main__":
     # Configuration from environment
-    port = int(os.getenv("PORT", "8005"))
+    port = int(os.getenv("PORT", "8004"))
     host = os.getenv("HOST", "0.0.0.0")
     reload = os.getenv("RELOAD", "false").lower() == "true"
     
@@ -64,20 +61,29 @@ if __name__ == "__main__":
     logger.info(f"   Health:     http://localhost:{port}/health")
     logger.info("=" * 60)
     logger.info("📝 Capabilities:")
-    logger.info("   - LLM-powered intelligent summarization")
-    logger.info("   - Clinical summary style optimization")
-    logger.info("   - Key information extraction")
-    logger.info("   - Medical context preservation")
-    logger.info("   - Structured output generation")
+    logger.info("   - Extract text chunks around search matches")
+    logger.info("   - Smart boundary detection for medical context")
+    logger.info("   - Medical term highlighting and summarization")
+    logger.info("   - Preserve clinical relationships in chunks")
+    logger.info("   - No LLM required - pure algorithmic")
+    logger.info("=" * 60)
+    logger.info("⚙️  Configuration:")
+    logger.info(f"   Default context:  {agent.DEFAULT_LINES_BEFORE} lines before, {agent.DEFAULT_LINES_AFTER} lines after")
+    logger.info(f"   Max chunk size:   {agent.MAX_CHUNK_SIZE} lines")
     logger.info("=" * 60)
     logger.info("Example usage:")
     logger.info(f'  curl -X POST http://localhost:{port}/a2a/v1/message/sync \\')
     logger.info('    -H "Content-Type: application/json" \\')
     logger.info('    -d \'{"message": {"role": "user", "parts": [{"kind": "data", "data": {')
-    logger.info('      "chunk_content": "Patient diagnosed with diabetes type 2...",')
-    logger.info('      "chunk_metadata": {"source": "pipeline_analysis", "total_matches": 3},')
-    logger.info('      "summary_style": "clinical"')
-    logger.info('    }}]}}\'')
+    logger.info('      "match_info": {')
+    logger.info('        "pattern": "diabetes",')
+    logger.info('        "line_number": 5,')
+    logger.info('        "match_text": "diabetes type 2",')
+    logger.info('        "document": "Line 1\\nLine 2\\nLine 3\\nLine 4\\nPatient has diabetes type 2\\nLine 6\\nLine 7"')
+    logger.info('      },')
+    logger.info('      "lines_before": 3,')
+    logger.info('      "lines_after": 3')
+    logger.info('    }}], "kind": "message"}}\'')
     logger.info("=" * 60)
     
     # Run the server
