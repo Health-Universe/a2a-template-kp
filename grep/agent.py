@@ -1,358 +1,406 @@
 """
-Pattern Search (Grep) Agent
-Searches documents using regex patterns with intelligent error handling.
-This is a pure algorithmic agent - no LLM needed for the core search functionality.
+Document Search Agent (Grep)
+Searches documents using keywords and patterns to find relevant content.
+Health Universe compatible with A2A compliance.
 """
 
 import json
+import os
+import sys
 import re
-from typing import List, Dict, Any, Optional, Union
+from pathlib import Path
+from typing import List, Dict, Any, Union
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from a2a.types import AgentSkill
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+
 from base import A2AAgent
 from utils.logging import get_logger
+
 
 logger = get_logger(__name__)
 
 
-class GrepAgent(A2AAgent):
+class DocumentSearchAgent(A2AAgent):
     """
-    Pattern search agent that searches documents using regex patterns.
-    Pure algorithmic implementation - no LLM required for searching.
+    Agent that searches documents using keywords and regex patterns.
+    Returns structured data with matches and locations.
     """
-
-    # Configuration
-    MAX_MATCHES_PER_PATTERN = 100  # Limit matches per pattern to avoid memory issues
-    CONTEXT_LINES_BEFORE = 2
-    CONTEXT_LINES_AFTER = 2
 
     # --- A2A Metadata ---
     def get_agent_name(self) -> str:
-        return "CS Pipeline - Grep"
+        return "Document Search Agent"
 
     def get_agent_description(self) -> str:
         return (
-            "High-performance regex search agent for medical documents. "
-            "Handles pattern validation, error recovery, and context extraction."
+            "Searches documents using provided keywords and regex patterns. "
+            "Finds relevant content matches with line numbers and context. "
+            "Returns structured results for further processing by downstream agents."
         )
 
     def get_agent_version(self) -> str:
-        return "2.0.0"  # Template-based version
+        return "1.0.0"
 
     def get_agent_skills(self) -> List[AgentSkill]:
         return [
             AgentSkill(
-                id="search_patterns",
-                name="Search Document Patterns",
-                description="Search for regex patterns in documents with error handling",
-                tags=["grep", "search", "pattern", "regex", "medical"],
-                inputModes=["application/json"],
-                outputModes=["application/json"],
-            ),
-            AgentSkill(
-                id="validate_patterns",
-                name="Validate Regex Patterns",
-                description="Validate and test regex patterns before searching",
-                tags=["regex", "validation"],
+                id="search_document",
+                name="Document Search",
+                description="Search documents using keywords and patterns to find relevant content",
+                tags=["search", "grep", "text", "pattern"],
                 inputModes=["application/json"],
                 outputModes=["application/json"],
             )
         ]
 
     def supports_streaming(self) -> bool:
-        return False
+        return True  # Required by Health Universe platform
 
     def get_system_instruction(self) -> str:
         return (
-            "You are a high-performance pattern search agent. "
-            "Execute regex searches efficiently with proper error handling."
+            "You are a document search specialist. Your role is to find relevant content "
+            "in documents using provided keywords and patterns. Focus on: "
+            "1) Accurate pattern matching "
+            "2) Context preservation "
+            "3) Comprehensive coverage "
+            "4) Structured result reporting "
+            "Be thorough but efficient in your search operations."
         )
 
     # --- Core Processing ---
     async def process_message(self, message: str) -> Union[Dict[str, Any], str]:
         """
-        Search document with regex patterns.
-        Input: JSON with patterns, document_content, and optional case_sensitive flag
-        Output: Dict with matches array and search metadata (will be wrapped in DataPart)
+        Search document using provided keywords and patterns.
+        Returns dict with matches (will be wrapped in DataPart).
         """
         try:
-            # Parse input
-            data = self._parse_input(message)
+            # Parse input - expect structured data with keywords and document
+            search_data = self._parse_search_input(message)
             
-            # Extract parameters
-            patterns = data.get("patterns", [])
-            document = data.get("document_content", data.get("document", ""))
-            case_sensitive = data.get("case_sensitive", False)
+            if "error" in search_data:
+                return search_data
             
-            # Validate inputs
-            if not patterns:
-                return {
-                    "error": "No patterns provided",
-                    "matches": [],
-                    "total_matches": 0
-                }
-            
-            if not document:
-                return {
-                    "error": "No document content provided",
-                    "matches": [],
-                    "total_matches": 0
-                }
-            
-            # Normalize patterns input
-            if isinstance(patterns, str):
-                patterns = [patterns]
-            elif isinstance(patterns, dict):
-                # Handle structured pattern objects from keyword agent
-                patterns = self._extract_patterns_from_structured(patterns)
+            # Extract components
+            keywords = search_data.get("keywords", {})
+            document = search_data.get("document", "")
+            patterns = search_data.get("patterns", [])
             
             # Perform search
-            results = self._search_document(patterns, document, case_sensitive)
+            matches = await self._search_document(keywords, patterns, document)
             
-            return results  # Return dict for DataPart
+            # Structure results
+            results = {
+                "matches": matches,
+                "metadata": {
+                    "searcher": "grep_agent_v1",
+                    "document_length": len(document),
+                    "total_matches": len(matches),
+                    "keywords_used": len(keywords.get("keywords", [])),
+                    "patterns_used": len(patterns)
+                }
+            }
+            
+            # Return dict directly - base agent will wrap in DataPart
+            return results
             
         except Exception as e:
-            logger.error(f"Search error: {e}")
+            logger.error(f"Error searching document: {e}")
             return {
                 "error": str(e),
-                "matches": [],
-                "total_matches": 0
+                "matches": []
             }
 
-    def _parse_input(self, message: str) -> Dict[str, Any]:
-        """Parse input message."""
+    def _parse_search_input(self, message: str) -> Dict[str, Any]:
+        """Parse input message to extract search parameters."""
         try:
+            # Try to parse as JSON first
             data = json.loads(message)
+            
             if isinstance(data, dict):
-                return data
-            return {"document": message}
-        except:
-            return {"document": message}
+                # Extract keywords object
+                keywords = data.get("keywords", {})
+                
+                # Extract document
+                document = data.get("document", "")
+                
+                # Extract patterns from keywords if available
+                patterns = []
+                if isinstance(keywords, dict):
+                    patterns = keywords.get("patterns", [])
+                    # Also look for patterns in top level
+                    patterns.extend(data.get("patterns", []))
+                
+                return {
+                    "keywords": keywords,
+                    "document": document,
+                    "patterns": patterns
+                }
+            else:
+                return {"error": "Invalid input format - expected structured data"}
+                
+        except json.JSONDecodeError:
+            # If not JSON, try to extract from text
+            return self._parse_text_input(message)
+    
+    def _parse_text_input(self, message: str) -> Dict[str, Any]:
+        """Fallback parser for text input."""
+        # Simple text input - treat as keywords to search in the same text
+        words = message.split()
+        keywords = {"keywords": words[:10]}  # Limit to first 10 words as keywords
+        
+        return {
+            "keywords": keywords,
+            "document": message,
+            "patterns": []
+        }
 
-    def _extract_patterns_from_structured(self, patterns_data: Dict) -> List[str]:
-        """Extract pattern strings from structured pattern data."""
-        patterns = []
-        
-        # Handle categorized patterns from keyword agent
-        for category in ["section_patterns", "clinical_patterns", "medication_patterns", 
-                        "temporal_patterns", "vital_patterns", "term_patterns"]:
-            if category in patterns_data:
-                for pattern_obj in patterns_data[category]:
-                    if isinstance(pattern_obj, dict) and "pattern" in pattern_obj:
-                        patterns.append(pattern_obj["pattern"])
-                    elif isinstance(pattern_obj, str):
-                        patterns.append(pattern_obj)
-        
-        # Also check for direct patterns list
-        if "patterns" in patterns_data:
-            for p in patterns_data["patterns"]:
-                if isinstance(p, str):
-                    patterns.append(p)
-        
-        return patterns
-
-    def _search_document(self, patterns: List[str], document: str, case_sensitive: bool) -> Dict[str, Any]:
+    async def _search_document(
+        self, 
+        keywords: Dict[str, Any], 
+        patterns: List[str], 
+        document: str
+    ) -> List[Dict[str, Any]]:
         """
-        Perform the actual search operation.
-        Returns structured results with matches and metadata.
+        Search document using keywords and patterns.
+        Returns list of match objects with context.
         """
         matches = []
-        errors = []
-        patterns_searched = 0
+        doc_lines = document.split('\n')
         
-        # Split document into lines for line-based searching
-        # If no newlines, try to intelligently split on sentence boundaries
-        lines = document.splitlines()
-        if len(lines) == 1 and len(document) > 500:
-            # Document is one long line - try to split on periods followed by space and capital
-            import re
-            # Split on periods followed by space, but preserve the period
-            sentences = re.split(r'(?<=\.)\s+(?=[A-Z])', document)
-            if len(sentences) > 1:
-                lines = sentences
-                logger.info(f"Document had no newlines, split into {len(lines)} sentences")
-            else:
-                # Last resort: split on any period followed by space
-                lines = re.split(r'(?<=\.)\s+', document)
-                if len(lines) == 1:
-                    # Still one line - leave as is
-                    logger.warning("Document is one continuous line without clear sentence breaks")
+        # Extract keyword list
+        keyword_list = keywords.get("keywords", [])
+        if not isinstance(keyword_list, list):
+            keyword_list = []
         
-        # Create line index for faster context extraction
-        line_index = {i: line for i, line in enumerate(lines)}
+        # Search using keywords
+        for keyword in keyword_list:
+            if not isinstance(keyword, str) or not keyword.strip():
+                continue
+                
+            keyword = keyword.strip()
+            matches.extend(self._search_keyword(keyword, doc_lines))
         
-        # Search each pattern
+        # Search using patterns
         for pattern in patterns:
-            patterns_searched += 1
-            pattern_matches = self._search_single_pattern(
-                pattern, lines, line_index, case_sensitive
-            )
-            
-            if isinstance(pattern_matches, dict) and "error" in pattern_matches:
-                errors.append(pattern_matches)
-            else:
-                matches.extend(pattern_matches)
-            
-            # Limit total matches to prevent memory issues
-            if len(matches) > 1000:
-                logger.warning(f"Truncating matches at 1000 (searched {patterns_searched}/{len(patterns)} patterns)")
-                break
+            if not isinstance(pattern, str) or not pattern.strip():
+                continue
+                
+            try:
+                matches.extend(self._search_pattern(pattern, doc_lines))
+            except re.error as e:
+                logger.warning(f"Invalid regex pattern '{pattern}': {e}")
+                continue
         
-        # Sort matches by line number
-        matches.sort(key=lambda x: x.get("line_number", 0))
+        # Remove duplicates while preserving order
+        unique_matches = []
+        seen_locations = set()
         
-        # Build result with type identifier
-        result = {
-            "type": "grep.result.v1",  # Type identifier for explicit contract
-            "source": "grep",
-            "matches": matches,
-            "total_matches": len(matches),
-            "patterns_searched": patterns_searched,
-            "patterns_total": len(patterns),
-            "document_lines": len(lines)
-        }
+        for match in matches:
+            location_key = (match.get("line_number"), match.get("start_pos"))
+            if location_key not in seen_locations:
+                seen_locations.add(location_key)
+                unique_matches.append(match)
         
-        if errors:
-            result["errors"] = errors
+        # Sort by line number, then by position
+        unique_matches.sort(key=lambda x: (x.get("line_number", 0), x.get("start_pos", 0)))
         
-        # Debug logging
-        logger.info(f"Grep search complete: {len(matches)} total matches from {patterns_searched} patterns across {len(lines)} lines")
-        if matches:
-            # Log sample of unique line numbers
-            unique_lines = set(m.get("line_number", 0) for m in matches[:20])
-            logger.debug(f"Sample of match line numbers: {sorted(unique_lines)[:10]}")
+        # Limit results to prevent overwhelming downstream agents
+        MAX_MATCHES = int(os.getenv("MAX_GREP_MATCHES", "100"))
+        if len(unique_matches) > MAX_MATCHES:
+            logger.info(f"Limiting results to {MAX_MATCHES} matches (found {len(unique_matches)})")
+            unique_matches = unique_matches[:MAX_MATCHES]
         
-        return result
+        return unique_matches
 
-    def _search_single_pattern(self, pattern: str, lines: List[str], 
-                              line_index: Dict[int, str], case_sensitive: bool) -> List[Dict[str, Any]]:
-        """Search for a single pattern and return matches or error."""
+    def _search_keyword(self, keyword: str, doc_lines: List[str]) -> List[Dict[str, Any]]:
+        """Search for a keyword in document lines."""
+        matches = []
+        
+        for line_num, line in enumerate(doc_lines, 1):
+            # Case-insensitive search for keywords
+            line_lower = line.lower()
+            keyword_lower = keyword.lower()
+            
+            start_pos = 0
+            while True:
+                pos = line_lower.find(keyword_lower, start_pos)
+                if pos == -1:
+                    break
+                
+                match = {
+                    "type": "keyword",
+                    "keyword": keyword,
+                    "line_number": line_num,
+                    "line_content": line.strip(),
+                    "start_pos": pos,
+                    "end_pos": pos + len(keyword),
+                    "matched_text": line[pos:pos + len(keyword)],
+                    "context_before": line[:pos].strip()[-50:] if pos > 0 else "",
+                    "context_after": line[pos + len(keyword):].strip()[:50],
+                }
+                
+                matches.append(match)
+                start_pos = pos + 1  # Continue searching for overlapping matches
+        
+        return matches
+
+    def _search_pattern(self, pattern: str, doc_lines: List[str]) -> List[Dict[str, Any]]:
+        """Search for a regex pattern in document lines."""
         matches = []
         
         try:
-            # Compile regex with appropriate flags
-            flags = re.IGNORECASE | re.MULTILINE if not case_sensitive else re.MULTILINE
-            regex = re.compile(pattern, flags)
-            
-            # Search through lines
-            for line_num, line in enumerate(lines):
-                # Find all matches in this line
-                for match in regex.finditer(line):
-                    # Create match info
-                    match_info = {
-                        "pattern": pattern,
-                        "line_number": line_num + 1,  # 1-based line numbers
-                        "match_text": match.group(),
-                        "line_content": line,
-                        "start_pos": match.start(),
-                        "end_pos": match.end(),
-                        "file_path": "document.txt",
-                    }
-                    
-                    # Add context lines
-                    match_info["context_before"] = self._get_context_before(
-                        line_num, line_index, self.CONTEXT_LINES_BEFORE
-                    )
-                    match_info["context_after"] = self._get_context_after(
-                        line_num, line_index, self.CONTEXT_LINES_AFTER
-                    )
-                    
-                    # Add the document content for chunk agent (but not in the matches)
-                    # This will be passed separately in the orchestrator
-                    match_info["document"] = "\n".join(lines)
-                    
-                    matches.append(match_info)
-                    
-                    # Limit matches per pattern
-                    if len(matches) >= self.MAX_MATCHES_PER_PATTERN:
-                        logger.debug(f"Pattern '{pattern}' hit match limit of {self.MAX_MATCHES_PER_PATTERN}")
-                        return matches
-            
-            return matches
-            
+            regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
         except re.error as e:
-            # Return error info for this pattern
             logger.warning(f"Invalid regex pattern '{pattern}': {e}")
-            return {
-                "error": f"Invalid regex pattern",
-                "pattern": pattern,
-                "details": str(e),
-                "suggestion": self._suggest_pattern_fix(pattern, str(e))
-            }
-        except Exception as e:
-            logger.error(f"Unexpected error searching pattern '{pattern}': {e}")
-            return {
-                "error": "Search failed",
-                "pattern": pattern,
-                "details": str(e)
-            }
-
-    def _get_context_before(self, line_num: int, line_index: Dict[int, str], num_lines: int) -> List[str]:
-        """Get context lines before the match."""
-        context = []
-        for i in range(max(0, line_num - num_lines), line_num):
-            if i in line_index:
-                context.append(line_index[i])
-        return context
-
-    def _get_context_after(self, line_num: int, line_index: Dict[int, str], num_lines: int) -> List[str]:
-        """Get context lines after the match."""
-        context = []
-        for i in range(line_num + 1, min(len(line_index), line_num + num_lines + 1)):
-            if i in line_index:
-                context.append(line_index[i])
-        return context
-
-    def _suggest_pattern_fix(self, pattern: str, error: str) -> str:
-        """Suggest a fix for an invalid regex pattern."""
-        error_lower = error.lower()
+            return matches
         
-        if "unbalanced parenthesis" in error_lower or "missing )" in error_lower:
-            open_count = pattern.count("(")
-            close_count = pattern.count(")")
-            if open_count > close_count:
-                return f"Missing {open_count - close_count} closing parenthesis ')'. Check: {pattern}"
-            elif close_count > open_count:
-                return f"Extra closing parenthesis. Check: {pattern}"
-            else:
-                return f"Check parentheses pairing and escaping in: {pattern}"
+        for line_num, line in enumerate(doc_lines, 1):
+            for match in regex.finditer(line):
+                match_obj = {
+                    "type": "pattern",
+                    "pattern": pattern,
+                    "line_number": line_num,
+                    "line_content": line.strip(),
+                    "start_pos": match.start(),
+                    "end_pos": match.end(),
+                    "matched_text": match.group(0),
+                    "context_before": line[:match.start()].strip()[-50:] if match.start() > 0 else "",
+                    "context_after": line[match.end():].strip()[:50],
+                }
                 
-        elif "bad escape" in error_lower or "bad character" in error_lower:
-            return f"Invalid escape sequence. Use raw strings (r'...') or double backslashes. Pattern: {pattern}"
-            
-        elif "nothing to repeat" in error_lower:
-            # Find the problematic quantifier
-            for q in ["*", "+", "?", "{"]:
-                if q in pattern:
-                    idx = pattern.find(q)
-                    if idx == 0 or (idx > 0 and pattern[idx-1] in "*+?{"):
-                        return f"Quantifier '{q}' at position {idx} needs a pattern before it"
-            return f"Quantifier (*,+,?,{{}}) needs something before it in: {pattern}"
-            
-        elif "bad character range" in error_lower:
-            return f"Invalid character range in [...]. Check dash placement: {pattern}"
-            
-        elif "multiple repeat" in error_lower:
-            return f"Cannot stack quantifiers (like **). Simplify: {pattern}"
-            
-        else:
-            # Generic suggestion
-            simplified = self._simplify_pattern(pattern)
-            if simplified != pattern:
-                return f"Try simplified version: {simplified}"
-            return "Check regex syntax. Test at regex101.com with Python flavor"
+                # Add capture groups if present
+                if match.groups():
+                    match_obj["groups"] = match.groups()
+                
+                matches.append(match_obj)
+        
+        return matches
 
-    def _simplify_pattern(self, pattern: str) -> str:
-        """Attempt to simplify a complex pattern."""
-        # Remove excessive escaping
-        simplified = pattern.replace(r"\\", "\\")
+    def _validate_search_results(self, matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate and clean search results."""
+        valid_matches = []
         
-        # Simplify common issues
-        simplified = re.sub(r'\*+', '*', simplified)  # Multiple * to single *
-        simplified = re.sub(r'\++', '+', simplified)  # Multiple + to single +
-        simplified = re.sub(r'\?+', '?', simplified)  # Multiple ? to single ?
+        for match in matches:
+            # Ensure required fields
+            if not isinstance(match, dict):
+                continue
+                
+            # Validate match structure
+            required_fields = ["type", "line_number", "line_content", "matched_text"]
+            if not all(field in match for field in required_fields):
+                logger.warning(f"Invalid match structure, skipping: {match}")
+                continue
+            
+            # Clean and validate data types
+            try:
+                match["line_number"] = int(match["line_number"])
+                match["start_pos"] = int(match.get("start_pos", 0))
+                match["end_pos"] = int(match.get("end_pos", 0))
+                
+                # Ensure string fields are strings
+                for field in ["type", "line_content", "matched_text"]:
+                    match[field] = str(match[field])
+                
+                valid_matches.append(match)
+                
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid match data types, skipping: {e}")
+                continue
         
-        # Remove problematic lookarounds if present
-        simplified = re.sub(r'\(\?[=!<].*?\)', '', simplified)
+        return valid_matches
+
+    # --- Helper Methods for Complex Searches ---
+    def _search_multi_line_patterns(self, pattern: str, document: str) -> List[Dict[str, Any]]:
+        """Search for patterns that may span multiple lines."""
+        matches = []
         
-        return simplified if simplified != pattern else pattern
+        try:
+            regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+            
+            for match in regex.finditer(document):
+                # Calculate line number for match start
+                lines_before = document[:match.start()].count('\n')
+                line_number = lines_before + 1
+                
+                match_obj = {
+                    "type": "multiline_pattern",
+                    "pattern": pattern,
+                    "line_number": line_number,
+                    "start_pos": match.start(),
+                    "end_pos": match.end(),
+                    "matched_text": match.group(0),
+                    "context_before": document[max(0, match.start()-100):match.start()],
+                    "context_after": document[match.end():match.end()+100],
+                }
+                
+                # Add capture groups if present
+                if match.groups():
+                    match_obj["groups"] = match.groups()
+                
+                matches.append(match_obj)
+                
+        except re.error as e:
+            logger.warning(f"Invalid multiline regex pattern '{pattern}': {e}")
+        
+        return matches
+
+    def _create_search_summary(self, matches: List[Dict[str, Any]]) -> str:
+        """Create a text summary of search results."""
+        if not matches:
+            return "No matches found in the document."
+        
+        summary_lines = [f"Found {len(matches)} matches:"]
+        
+        # Group by type
+        keyword_matches = [m for m in matches if m.get("type") == "keyword"]
+        pattern_matches = [m for m in matches if m.get("type") == "pattern"]
+        
+        if keyword_matches:
+            summary_lines.append(f"\nKeyword matches: {len(keyword_matches)}")
+            # Show top keywords
+            keyword_counts = {}
+            for match in keyword_matches:
+                keyword = match.get("keyword", "unknown")
+                keyword_counts[keyword] = keyword_counts.get(keyword, 0) + 1
+            
+            top_keywords = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            for keyword, count in top_keywords:
+                summary_lines.append(f"  - '{keyword}': {count} times")
+        
+        if pattern_matches:
+            summary_lines.append(f"\nPattern matches: {len(pattern_matches)}")
+        
+        # Show line distribution
+        lines_with_matches = set(m.get("line_number") for m in matches)
+        summary_lines.append(f"\nMatches found on {len(lines_with_matches)} different lines")
+        
+        return "\n".join(summary_lines)
+
+
+# --- Module-level app creation for Health Universe deployment ---
+agent = DocumentSearchAgent()
+agent_card = agent.create_agent_card()
+task_store = InMemoryTaskStore()
+request_handler = DefaultRequestHandler(
+    agent_executor=agent,
+    task_store=task_store
+)
+
+app = A2AStarletteApplication(
+    agent_card=agent_card,  # A2A Spec: MUST make AgentCard available
+    http_handler=request_handler  # Handles RPC methods
+).build()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8003))
+    print(f"🚀 Starting {agent.get_agent_name()}")
+    print(f"📍 Available at: http://localhost:{port}")
+    print(f"🔍 Agent Card: http://localhost:{port}/.well-known/agentcard.json")
+    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -1,40 +1,44 @@
-# summarize_agent.py
-from __future__ import annotations
+"""
+Document Summarizer Agent
+Analyzes content chunks and generates structured summaries.
+Health Universe compatible with A2A compliance.
+"""
 
 import json
-import logging
-from typing import Dict, Any, Optional, List, Callable
+import os
+import sys
+from pathlib import Path
+from typing import List, Dict, Any, Union
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from a2a.types import AgentSkill
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
 
 from base import A2AAgent
-from a2a.types import AgentSkill
-from google.adk.tools import FunctionTool
+from utils.logging import get_logger
 
 
-class SummarizeAgent(A2AAgent):
+logger = get_logger(__name__)
+
+
+class DocumentSummarizerAgent(A2AAgent):
     """
-    LLM-powered summarization agent that creates intelligent summaries from medical documents.
-    Follows the simple_orchestrator pattern with tools for LLM interaction.
+    LLM-powered agent that analyzes content chunks and generates structured summaries.
     """
 
-    def __init__(self, logger: Optional[logging.Logger] = None):
-        super().__init__()
-        self.logger = logger or logging.getLogger(self.__class__.__name__)
-        
-        # Bind the tool to this instance
-        def _tool(chunk_content: str, chunk_metadata: Optional[Dict[str, Any]] = None, 
-                 summary_style: str = "clinical") -> str:
-            return self._summarize_with_llm(chunk_content, chunk_metadata, summary_style)
-        
-        self._summarize_tool: Callable[[str, Optional[Dict[str, Any]], str], str] = _tool
-
-    # --------------- A2A metadata --------------- #
+    # --- A2A Metadata ---
     def get_agent_name(self) -> str:
-        return "CS Pipeline - Summarization"
+        return "Document Summarizer"
 
     def get_agent_description(self) -> str:
         return (
-            "LLM-powered agent that creates intelligent summaries from medical document chunks. "
-            "Extracts key clinical information and generates structured summaries."
+            "Analyzes content chunks to generate comprehensive document summaries. "
+            "Creates structured analysis including key findings, themes, and insights. "
+            "Provides human-readable summaries suitable for review and decision-making."
         )
 
     def get_agent_version(self) -> str:
@@ -43,180 +47,289 @@ class SummarizeAgent(A2AAgent):
     def get_agent_skills(self) -> List[AgentSkill]:
         return [
             AgentSkill(
-                id="summarize_chunks",
-                name="Summarize Document Chunks",
-                description="Create intelligent summary from extracted text chunks using LLM",
-                tags=["summarize", "extract", "medical", "analysis", "llm"],
-                input_modes=["text/plain", "application/json"],
-                output_modes=["text/plain", "text/markdown"],
+                id="summarize_content",
+                name="Content Summarization",
+                description="Analyze content chunks and generate structured summaries with key insights",
+                tags=["summary", "analysis", "nlp", "insights"],
+                inputModes=["application/json"],
+                outputModes=["text/plain", "text/markdown"],
             )
         ]
 
     def supports_streaming(self) -> bool:
-        return False
+        return True  # Required by Health Universe platform
 
     def get_system_instruction(self) -> str:
-        return """You are a medical document summarization expert. Your role is to create concise, accurate summaries of medical document chunks.
+        return (
+            "You are a document analysis and summarization specialist. Your role is to "
+            "analyze content chunks and create comprehensive summaries. Focus on: "
+            "1) Key findings and important information "
+            "2) Main themes and patterns "
+            "3) Actionable insights "
+            "4) Clear, structured presentation "
+            "Create summaries that are informative, well-organized, and easy to understand."
+        )
 
-When using the summarize_chunks tool, you should:
-1. Extract key medical information from the provided chunks
-2. Identify diagnoses, medications, procedures, and vital signs
-3. Create structured summaries appropriate for clinical use
-4. Preserve critical medical details while removing redundancy
-5. Organize information in a logical, clinically relevant manner
-
-Summarization guidelines:
-- Focus on medically significant information
-- Preserve exact medication names and dosages
-- Include all diagnoses and conditions mentioned
-- Note important dates and temporal relationships
-- Highlight abnormal findings or critical values
-- Maintain clinical accuracy and precision
-
-Summary styles:
-- clinical: Structured format for healthcare providers
-- patient: Simplified language for patient understanding
-- research: Detailed with emphasis on data and findings
-- administrative: Focus on procedures and billing codes
-
-Output format for clinical style:
-1. Chief Findings
-2. Diagnoses/Conditions
-3. Medications
-4. Procedures/Tests
-5. Vital Signs/Labs
-6. Follow-up/Recommendations
-
-Always ensure medical accuracy and never omit critical information."""
-
-    def get_tools(self) -> List:
-        """Expose the summarization tool for LLM use."""
-        return [FunctionTool(func=self._summarize_tool)]
-
-    # --------------- Core Processing --------------- #
+    # --- Core Processing ---
     async def process_message(self, message: str) -> str:
         """
-        Process incoming message. With tools, the LLM will handle this.
-        For direct calls, we process the message ourselves.
+        Analyze chunks and generate summary.
+        Returns string summary (will be wrapped in TextPart).
         """
+        try:
+            # Parse input - expect structured data with chunks
+            chunk_data = self._parse_chunk_input(message)
+            
+            if "error" in chunk_data:
+                return f"Error parsing input: {chunk_data['error']}"
+            
+            # Extract chunks
+            chunks = chunk_data.get("chunks", [])
+            
+            if not chunks:
+                return "No content chunks provided for summarization."
+            
+            # Generate summary using LLM
+            summary = await self._generate_summary(chunks)
+            
+            # Return string directly - base agent will wrap in TextPart
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error generating summary: {e}")
+            return self._create_fallback_summary(chunk_data.get("chunks", []))
+
+    def _parse_chunk_input(self, message: str) -> Dict[str, Any]:
+        """Parse input message to extract chunks."""
         try:
             # Try to parse as JSON first
             data = json.loads(message)
             
-            # Extract content and metadata
-            content = data.get("chunk_content", data.get("content", ""))
-            metadata = data.get("chunk_metadata", data.get("metadata", {}))
-            summary_style = data.get("summary_style", "clinical")
-            
-            # Create summary using LLM
-            summary = self._summarize_with_llm(content, metadata, summary_style)
-            
-            return summary
-            
+            if isinstance(data, dict):
+                # Extract chunks array
+                chunks = data.get("chunks", [])
+                
+                return {
+                    "chunks": chunks,
+                    "metadata": data.get("metadata", {})
+                }
+            else:
+                return {"error": "Invalid input format - expected structured data"}
+                
         except json.JSONDecodeError:
-            # Plain text - create basic summary
-            summary = self._summarize_with_llm(message, {}, "clinical")
+            return {"error": "Invalid JSON input"}
+
+    async def _generate_summary(self, chunks: List[Dict[str, Any]]) -> str:
+        """Generate summary using LLM with structured output."""
+        
+        # Prepare content for LLM
+        chunk_contents = []
+        for i, chunk in enumerate(chunks, 1):
+            content = chunk.get("content", "").strip()
+            if content:
+                match_info = chunk.get("match_info", {})
+                matched_text = match_info.get("matched_text", "")
+                
+                chunk_text = f"Chunk {i}"
+                if matched_text:
+                    chunk_text += f" (Match: '{matched_text}')"
+                chunk_text += f":\n{content}\n"
+                
+                chunk_contents.append(chunk_text)
+        
+        combined_content = "\n---\n".join(chunk_contents)
+        
+        # Limit content length for LLM processing
+        MAX_CONTENT_LENGTH = int(os.getenv("MAX_SUMMARY_INPUT", "4000"))
+        if len(combined_content) > MAX_CONTENT_LENGTH:
+            combined_content = combined_content[:MAX_CONTENT_LENGTH] + "\n\n[Content truncated...]"
+        
+        prompt = f"""Analyze the following content chunks and create a comprehensive summary.
+
+Content Chunks:
+{combined_content}
+
+Please provide:
+1. **Executive Summary**: A brief overview of the main findings (2-3 sentences)
+2. **Key Findings**: The most important information discovered (bullet points)
+3. **Themes and Patterns**: Any recurring themes or patterns identified
+4. **Detailed Analysis**: More detailed insights from the content
+5. **Recommendations**: Any actionable recommendations or next steps (if applicable)
+
+Format your response in clear markdown with appropriate headers."""
+        
+        try:
+            # Use LLM utility if available
+            from utils.llm_utils import generate_text
+            
+            summary = await generate_text(
+                prompt=prompt,
+                system_instruction=self.get_system_instruction(),
+                temperature=0.5,  # Balanced creativity for summary writing
+                max_tokens=2000
+            )
+            
+            if not summary:
+                return self._create_fallback_summary(chunks)
+            
             return summary
+            
+        except Exception as e:
+            logger.warning(f"LLM summary generation failed: {e}, using fallback")
+            return self._create_fallback_summary(chunks)
 
-    def _summarize_with_llm(self, chunk_content: str, 
-                           chunk_metadata: Optional[Dict[str, Any]] = None, 
-                           summary_style: str = "clinical") -> str:
-        """
-        Tool function that creates an intelligent summary using LLM guidance.
-        Returns formatted summary based on the specified style.
-        """
-        if not chunk_content or not chunk_content.strip():
-            return "No content available for summarization."
+    def _create_fallback_summary(self, chunks: List[Dict[str, Any]]) -> str:
+        """Create basic summary without LLM."""
+        if not chunks:
+            return "## Document Summary\n\nNo content was available for summarization."
         
-        # Build the summarization prompt
-        prompt = self._build_summary_prompt(chunk_content, chunk_metadata, summary_style)
+        summary_lines = ["# Document Analysis Summary\n"]
         
-        # For the tool-based approach, we return the prompt that guides the LLM
-        # The actual LLM processing happens in the A2A framework
-        return prompt
-
-    def _build_summary_prompt(self, content: str, metadata: Dict[str, Any], style: str) -> str:
-        """
-        Build a detailed prompt for the LLM to create the summary.
-        """
-        prompt = f"""Create a {style} summary of the following medical document chunks.
-
-"""
+        # Basic statistics
+        total_chunks = len(chunks)
+        total_chars = sum(len(c.get("content", "")) for c in chunks)
         
-        # Add metadata context if available
-        if metadata:
-            prompt += "Document Context:\n"
-            if "source" in metadata:
-                prompt += f"- Source: {metadata['source']}\n"
-            if "total_matches" in metadata:
-                prompt += f"- Total pattern matches: {metadata['total_matches']}\n"
-            if "chunks_extracted" in metadata:
-                prompt += f"- Chunks analyzed: {metadata['chunks_extracted']}\n"
-            prompt += "\n"
+        summary_lines.append(f"**Analysis Overview:**")
+        summary_lines.append(f"- Processed {total_chunks} content chunks")
+        summary_lines.append(f"- Total content: {total_chars:,} characters")
+        summary_lines.append("")
         
-        prompt += f"Content to summarize:\n{content}\n\n"
+        # Extract key information
+        matches = []
+        for chunk in chunks:
+            match_info = chunk.get("match_info", {})
+            matched_text = match_info.get("matched_text")
+            if matched_text and matched_text.strip():
+                matches.append(matched_text.strip())
         
-        # Add style-specific instructions
-        if style == "clinical":
-            prompt += """Create a clinical summary with the following structure:
-
-## Clinical Summary
-
-### Key Findings
-- List the most important medical findings
-
-### Diagnoses/Conditions
-- List all mentioned diagnoses and medical conditions
-
-### Medications
-- List all medications with dosages and frequencies
-
-### Procedures/Tests
-- List any procedures, surgeries, or diagnostic tests
-
-### Vital Signs/Lab Values
-- Include any vital signs or laboratory results
-
-### Recommendations/Follow-up
-- Note any treatment plans or follow-up instructions
-
-Focus on medical accuracy and completeness. Use bullet points for clarity."""
+        if matches:
+            # Remove duplicates while preserving order
+            unique_matches = []
+            seen = set()
+            for match in matches:
+                if match.lower() not in seen:
+                    seen.add(match.lower())
+                    unique_matches.append(match)
+            
+            summary_lines.append("## Key Terms Found")
+            for match in unique_matches[:10]:  # Top 10 matches
+                summary_lines.append(f"- {match}")
+            summary_lines.append("")
         
-        elif style == "patient":
-            prompt += """Create a patient-friendly summary that:
-- Uses simple, non-technical language
-- Explains medical terms when necessary
-- Focuses on what the patient needs to know
-- Organizes information clearly
-- Avoids medical jargon
+        # Content preview
+        summary_lines.append("## Content Preview")
+        for i, chunk in enumerate(chunks[:3], 1):  # First 3 chunks
+            content = chunk.get("content", "").strip()
+            if content:
+                # Truncate long content
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                
+                summary_lines.append(f"**Chunk {i}:**")
+                summary_lines.append(content)
+                summary_lines.append("")
+        
+        if len(chunks) > 3:
+            summary_lines.append(f"*... and {len(chunks) - 3} more chunks*")
+            summary_lines.append("")
+        
+        # Analysis notes
+        summary_lines.append("## Analysis Notes")
+        summary_lines.append("This is a basic summary created without advanced language processing.")
+        summary_lines.append("For more detailed analysis, please review the individual content chunks.")
+        summary_lines.append("")
+        
+        # Line coverage information
+        all_lines = set()
+        for chunk in chunks:
+            start = chunk.get("start_line")
+            end = chunk.get("end_line")
+            if start and end:
+                all_lines.update(range(start, end + 1))
+        
+        if all_lines:
+            min_line = min(all_lines)
+            max_line = max(all_lines)
+            summary_lines.append(f"**Document Coverage:** Lines {min_line}-{max_line} ({len(all_lines)} total lines)")
+        
+        return "\n".join(summary_lines)
 
-Structure:
-1. Main Health Issues
-2. Medications You're Taking
-3. Tests or Procedures Done
-4. What to Do Next"""
+    def _extract_themes(self, chunks: List[Dict[str, Any]]) -> List[str]:
+        """Extract themes using simple keyword analysis."""
+        themes = []
         
-        elif style == "research":
-            prompt += """Create a research-oriented summary that:
-- Emphasizes data and measurements
-- Includes all quantitative findings
-- Notes methodologies if mentioned
-- Preserves technical terminology
-- Highlights statistical significance
+        # Combine all content
+        all_content = " ".join(c.get("content", "") for c in chunks).lower()
+        
+        # Common medical/document themes
+        theme_keywords = {
+            "Medical Findings": ["diagnosis", "symptoms", "condition", "disease", "disorder"],
+            "Test Results": ["test", "result", "lab", "blood", "normal", "abnormal"],
+            "Treatment": ["treatment", "therapy", "medication", "prescription", "dosage"],
+            "Patient Information": ["patient", "age", "history", "background"],
+            "Recommendations": ["recommend", "suggest", "should", "consider", "follow-up"]
+        }
+        
+        for theme, keywords in theme_keywords.items():
+            if any(keyword in all_content for keyword in keywords):
+                themes.append(theme)
+        
+        return themes
 
-Structure:
-1. Clinical Presentation
-2. Diagnostic Findings
-3. Interventions
-4. Outcomes/Results
-5. Data Points"""
+    def _create_detailed_analysis(self, chunks: List[Dict[str, Any]]) -> str:
+        """Create detailed analysis section."""
+        analysis_lines = []
         
-        else:  # administrative or default
-            prompt += """Create an administrative summary focusing on:
-- Procedures performed (with codes if available)
-- Diagnoses (primary and secondary)
-- Medications prescribed
-- Follow-up requirements
-- Documentation completeness"""
+        # Analyze chunk distribution
+        line_ranges = []
+        for chunk in chunks:
+            start = chunk.get("start_line")
+            end = chunk.get("end_line")
+            if start and end:
+                line_ranges.append((start, end))
         
-        return prompt
+        if line_ranges:
+            line_ranges.sort()
+            analysis_lines.append("**Content Distribution:**")
+            analysis_lines.append(f"- Content spans from line {line_ranges[0][0]} to line {line_ranges[-1][1]}")
+            analysis_lines.append(f"- Found relevant content in {len(line_ranges)} sections")
+            analysis_lines.append("")
+        
+        # Match type analysis
+        match_types = {}
+        for chunk in chunks:
+            match_info = chunk.get("match_info", {})
+            match_type = match_info.get("type", "unknown")
+            match_types[match_type] = match_types.get(match_type, 0) + 1
+        
+        if match_types:
+            analysis_lines.append("**Match Types:**")
+            for match_type, count in match_types.items():
+                analysis_lines.append(f"- {match_type.title()}: {count} chunks")
+            analysis_lines.append("")
+        
+        return "\n".join(analysis_lines) if analysis_lines else ""
+
+
+# --- Module-level app creation for Health Universe deployment ---
+agent = DocumentSummarizerAgent()
+agent_card = agent.create_agent_card()
+task_store = InMemoryTaskStore()
+request_handler = DefaultRequestHandler(
+    agent_executor=agent,
+    task_store=task_store
+)
+
+app = A2AStarletteApplication(
+    agent_card=agent_card,  # A2A Spec: MUST make AgentCard available
+    http_handler=request_handler  # Handles RPC methods
+).build()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8005))
+    print(f"🚀 Starting {agent.get_agent_name()}")
+    print(f"📍 Available at: http://localhost:{port}")
+    print(f"🔍 Agent Card: http://localhost:{port}/.well-known/agentcard.json")
+    uvicorn.run(app, host="0.0.0.0", port=port)

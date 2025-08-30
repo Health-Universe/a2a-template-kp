@@ -1,383 +1,436 @@
 """
-Text Chunk Extractor Agent
-Extracts and formats text chunks from documents around match locations
-with intelligent medical context preservation.
+Content Chunk Extraction Agent
+Extracts contextual chunks around search matches for further analysis.
+Health Universe compatible with A2A compliance.
 """
 
 import json
-import re
-from typing import Dict, Any, List, Optional
+import os
+import sys
+from pathlib import Path
+from typing import List, Dict, Any, Union
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from a2a.types import AgentSkill
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+
 from base import A2AAgent
 from utils.logging import get_logger
+
 
 logger = get_logger(__name__)
 
 
-class ChunkAgent(A2AAgent):
+class ChunkExtractionAgent(A2AAgent):
     """
-    Text chunk extraction agent that extracts and formats chunks around matches.
-    Pure algorithmic implementation - no LLM required for chunk extraction.
+    Agent that extracts contextual chunks around search matches.
+    Returns structured data with content chunks and metadata.
     """
-
-    # Configuration
-    DEFAULT_LINES_BEFORE = 3
-    DEFAULT_LINES_AFTER = 3
-    MAX_CHUNK_SIZE = 50  # Maximum lines per chunk
 
     # --- A2A Metadata ---
     def get_agent_name(self) -> str:
-        return "CS Pipeline - Chunker"
+        return "Content Chunk Extractor"
 
     def get_agent_description(self) -> str:
         return (
-            "Extracts and formats text chunks from medical documents around match locations "
-            "with intelligent context preservation and medical term highlighting."
+            "Extracts contextual chunks of content around search matches. "
+            "Provides relevant context windows for better understanding of found content. "
+            "Returns structured chunks with metadata for downstream analysis."
         )
 
     def get_agent_version(self) -> str:
-        return "2.0.0"  # Template-based version
+        return "1.0.0"
 
     def get_agent_skills(self) -> List[AgentSkill]:
         return [
             AgentSkill(
-                id="extract_chunk",
-                name="Extract Text Chunk",
-                description="Extract and format text chunk with context around a match",
-                tags=["chunk", "extract", "context", "text", "medical"],
+                id="extract_chunks",
+                name="Content Chunk Extraction",
+                description="Extract contextual content chunks around search matches",
+                tags=["chunk", "context", "extraction", "text"],
                 inputModes=["application/json"],
-                outputModes=["text/plain", "text/markdown"],
-            ),
-            AgentSkill(
-                id="smart_boundaries",
-                name="Smart Boundary Detection",
-                description="Intelligently adjust chunk boundaries to preserve medical context",
-                tags=["medical", "context", "boundaries"],
-                inputModes=["application/json"],
-                outputModes=["text/plain"],
+                outputModes=["application/json"],
             )
         ]
 
     def supports_streaming(self) -> bool:
-        return False
+        return True  # Required by Health Universe platform
 
     def get_system_instruction(self) -> str:
         return (
-            "You are a text chunk extraction specialist for medical documents. "
-            "Extract meaningful chunks with appropriate context around matches."
+            "You are a content chunk extraction specialist. Your role is to extract "
+            "meaningful contextual chunks around search matches. Focus on: "
+            "1) Preserving relevant context "
+            "2) Maintaining readability "
+            "3) Avoiding content duplication "
+            "4) Providing useful metadata "
+            "Extract chunks that provide complete context for understanding the matches."
         )
 
     # --- Core Processing ---
-    async def process_message(self, message: str) -> str:
+    async def process_message(self, message: str) -> Union[Dict[str, Any], str]:
         """
-        Extract and format a text chunk around a match.
-        Input: JSON with match_info, optional lines_before/after
-        Output: Formatted text chunk with medical context
+        Extract chunks from search results and document.
+        Returns dict with chunks (will be wrapped in DataPart).
         """
         try:
-            # Parse input
-            data = self._parse_input(message)
+            # Parse input - expect structured data with search results and document
+            chunk_data = self._parse_chunk_input(message)
             
-            # Extract parameters
-            match_info = data.get("match_info", {})
-            lines_before = data.get("lines_before", self.DEFAULT_LINES_BEFORE)
-            lines_after = data.get("lines_after", self.DEFAULT_LINES_AFTER)
+            if "error" in chunk_data:
+                return chunk_data
             
-            # Validate input
-            if not match_info:
-                return "Error: No match_info provided"
+            # Extract components
+            search_results = chunk_data.get("search_results", {})
+            document = chunk_data.get("document", "")
             
-            # Extract and format chunk
-            chunk = self._extract_chunk(match_info, lines_before, lines_after)
+            # Extract matches from search results
+            matches = search_results.get("matches", [])
             
-            return chunk
+            # Extract chunks
+            chunks = await self._extract_chunks(matches, document)
+            
+            # Structure results
+            results = {
+                "chunks": chunks,
+                "metadata": {
+                    "extractor": "chunk_agent_v1",
+                    "document_length": len(document),
+                    "total_chunks": len(chunks),
+                    "matches_processed": len(matches),
+                    "avg_chunk_size": sum(len(c.get("content", "")) for c in chunks) / max(len(chunks), 1)
+                }
+            }
+            
+            # Return dict directly - base agent will wrap in DataPart
+            return results
             
         except Exception as e:
-            logger.error(f"Chunk extraction error: {e}")
-            return f"Error extracting chunk: {str(e)}"
+            logger.error(f"Error extracting chunks: {e}")
+            return {
+                "error": str(e),
+                "chunks": []
+            }
 
-    def _parse_input(self, message: str) -> Dict[str, Any]:
-        """Parse input message."""
+    def _parse_chunk_input(self, message: str) -> Dict[str, Any]:
+        """Parse input message to extract chunk parameters."""
         try:
+            # Try to parse as JSON first
             data = json.loads(message)
+            
             if isinstance(data, dict):
-                return data
-            return {"match_info": {}}
-        except:
-            return {"match_info": {}}
-
-    def _extract_chunk(self, match_info: Dict[str, Any], 
-                      lines_before: int, lines_after: int) -> str:
-        """
-        Extract and format a text chunk around the match.
-        """
-        # Get document content
-        document = match_info.get("document", match_info.get("file_content", ""))
-        
-        # If no full document, use simple format
-        if not document:
-            return self._format_simple_chunk(match_info)
-        
-        # Get match details
-        line_number = match_info.get("line_number", 1)
-        pattern = match_info.get("pattern", "unknown")
-        match_text = match_info.get("match_text", "")
-        
-        # Split document into lines
-        lines = document.splitlines()
-        
-        # Calculate smart boundaries
-        start_line, end_line = self._calculate_smart_boundaries(
-            lines, line_number, lines_before, lines_after, match_text
-        )
-        
-        # Build the formatted chunk
-        return self._format_chunk(
-            lines, start_line, end_line, line_number,
-            pattern, match_text, match_info
-        )
-
-    def _calculate_smart_boundaries(self, lines: List[str], line_number: int,
-                                   lines_before: int, lines_after: int,
-                                   match_text: str) -> tuple:
-        """
-        Calculate smart chunk boundaries that preserve medical context.
-        """
-        # Basic boundaries (convert to 0-based indexing)
-        line_idx = line_number - 1
-        start_idx = max(0, line_idx - lines_before)
-        end_idx = min(len(lines), line_idx + lines_after + 1)
-        
-        # Adjust start to sentence/section boundary
-        if start_idx > 0:
-            # Look backwards for a natural break
-            for i in range(start_idx, max(0, start_idx - 3), -1):
-                if i < len(lines):
-                    line = lines[i].strip()
-                    # Check for section headers or sentence starts
-                    if (line and (
-                        line[0].isupper() or
-                        line.startswith(('•', '-', '*', '1.', '2.', '3.')) or
-                        any(header in line.lower() for header in 
-                            ['history:', 'assessment:', 'plan:', 'diagnosis:', 'medications:'])
-                    )):
-                        start_idx = i
-                        break
-        
-        # Extend for medical context
-        if self._contains_medical_info(match_text):
-            # Check if we need more context for medications
-            if any(unit in match_text.lower() for unit in ['mg', 'ml', 'mcg', 'units', 'iu']):
-                # Look for medication name before dosage
-                if start_idx > 0 and line_idx > 0:
-                    prev_line = lines[line_idx - 1] if line_idx > 0 else ""
-                    if any(char.isalpha() for char in prev_line):
-                        start_idx = max(0, start_idx - 1)
+                # Extract search results
+                search_results = data.get("search_results", {})
                 
-                # Look for frequency/instructions after dosage
-                if end_idx < len(lines) - 1:
-                    next_line = lines[line_idx + 1] if line_idx < len(lines) - 1 else ""
-                    if any(freq in next_line.lower() for freq in 
-                          ['daily', 'twice', 'tid', 'bid', 'qid', 'prn', 'as needed']):
-                        end_idx = min(len(lines), end_idx + 1)
-            
-            # Check for vital signs context
-            if any(vital in match_text.lower() for vital in 
-                  ['blood pressure', 'bp', 'heart rate', 'hr', 'temperature', 'temp']):
-                # Include surrounding vital signs
-                end_idx = min(len(lines), end_idx + 2)
-        
-        # Ensure we don't exceed max chunk size
-        if end_idx - start_idx > self.MAX_CHUNK_SIZE:
-            # Center around the match
-            half_size = self.MAX_CHUNK_SIZE // 2
-            start_idx = max(0, line_idx - half_size)
-            end_idx = min(len(lines), line_idx + half_size + 1)
-        
-        return start_idx, end_idx
-
-    def _format_chunk(self, lines: List[str], start_idx: int, end_idx: int,
-                      match_line_num: int, pattern: str, match_text: str,
-                      match_info: Dict[str, Any]) -> str:
-        """
-        Format the extracted chunk with proper highlighting and context.
-        """
-        chunk_lines = []
-        
-        # Header
-        chunk_lines.append("=" * 50)
-        chunk_lines.append("📄 Medical Document Chunk")
-        chunk_lines.append("=" * 50)
-        chunk_lines.append(f"🔍 Pattern: {pattern}")
-        chunk_lines.append(f"✓ Match: '{match_text}' at line {match_line_num}")
-        chunk_lines.append("-" * 50)
-        chunk_lines.append("")
-        
-        # Context indicator if starting mid-document
-        if start_idx > 0:
-            chunk_lines.append(f"[...context from line {start_idx}...]")
-            chunk_lines.append("")
-        
-        # Add lines with formatting
-        match_idx = match_line_num - 1
-        for i in range(start_idx, end_idx):
-            if i >= len(lines):
-                break
-            
-            line_num = i + 1
-            line_text = lines[i]
-            
-            # Format based on whether it's the match line
-            if i == match_idx:
-                # Highlight the matching line
-                chunk_lines.append(f">>> {line_num:4d}: {line_text}")
+                # Extract document
+                document = data.get("document", "")
+                
+                return {
+                    "search_results": search_results,
+                    "document": document
+                }
             else:
-                # Regular context line with medical term detection
-                formatted = self._format_context_line(line_text)
-                chunk_lines.append(f"    {line_num:4d}: {formatted}")
+                return {"error": "Invalid input format - expected structured data"}
+                
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON input"}
+    
+    async def _extract_chunks(self, matches: List[Dict[str, Any]], document: str) -> List[Dict[str, Any]]:
+        """
+        Extract contextual chunks around matches.
+        """
+        if not matches:
+            # If no matches, create a summary chunk of the document
+            return self._create_summary_chunks(document)
         
-        # Context indicator if ending mid-document
-        if end_idx < len(lines):
-            chunk_lines.append("")
-            chunk_lines.append(f"[...continues at line {end_idx + 1}...]")
+        chunks = []
+        doc_lines = document.split('\n')
         
-        chunk_lines.append("")
-        chunk_lines.append("-" * 50)
+        # Configuration
+        CONTEXT_LINES = int(os.getenv("CHUNK_CONTEXT_LINES", "3"))  # Lines before/after match
+        MIN_CHUNK_LENGTH = int(os.getenv("MIN_CHUNK_LENGTH", "50"))   # Minimum chunk character length
+        MAX_CHUNK_LENGTH = int(os.getenv("MAX_CHUNK_LENGTH", "1000")) # Maximum chunk character length
         
-        # Add medical information summary
-        medical_summary = self._extract_medical_summary(
-            lines[start_idx:end_idx], match_idx - start_idx
-        )
-        if medical_summary:
-            chunk_lines.append("")
-            chunk_lines.append("📊 Key Medical Information:")
-            for item in medical_summary:
-                chunk_lines.append(f"  • {item}")
+        processed_lines = set()  # Track lines already included in chunks to avoid duplication
         
-        chunk_lines.append("=" * 50)
+        for match in matches:
+            chunk = self._extract_single_chunk(
+                match, doc_lines, CONTEXT_LINES, MIN_CHUNK_LENGTH, MAX_CHUNK_LENGTH, processed_lines
+            )
+            
+            if chunk:
+                chunks.append(chunk)
         
-        return "\n".join(chunk_lines)
+        # Merge overlapping chunks
+        chunks = self._merge_overlapping_chunks(chunks)
+        
+        # Sort by line number
+        chunks.sort(key=lambda x: x.get("start_line", 0))
+        
+        # Limit number of chunks
+        MAX_CHUNKS = int(os.getenv("MAX_CHUNKS", "50"))
+        if len(chunks) > MAX_CHUNKS:
+            logger.info(f"Limiting chunks to {MAX_CHUNKS} (found {len(chunks)})")
+            chunks = chunks[:MAX_CHUNKS]
+        
+        return chunks
 
-    def _format_simple_chunk(self, match_info: Dict[str, Any]) -> str:
-        """
-        Format a simple chunk when full document is not available.
-        """
-        pattern = match_info.get("pattern", "unknown")
-        match_text = match_info.get("match_text", "")
-        line_content = match_info.get("line_content", "No content available")
-        line_number = match_info.get("line_number", "unknown")
-        context_before = match_info.get("context_before", [])
-        context_after = match_info.get("context_after", [])
+    def _extract_single_chunk(
+        self,
+        match: Dict[str, Any],
+        doc_lines: List[str],
+        context_lines: int,
+        min_length: int,
+        max_length: int,
+        processed_lines: set
+    ) -> Dict[str, Any]:
+        """Extract a single chunk around a match."""
         
-        chunk_lines = [
-            "=" * 50,
-            "📄 Text Chunk (Limited Context)",
-            "=" * 50,
-            f"🔍 Pattern: {pattern}",
-            f"✓ Match: '{match_text}'",
-            f"📍 Line {line_number}",
-            "-" * 50,
-            ""
-        ]
+        line_num = match.get("line_number", 1)
         
-        # Add context before
-        if context_before:
-            chunk_lines.append("Context before:")
-            for line in context_before:
-                chunk_lines.append(f"    {line}")
-            chunk_lines.append("")
+        # Calculate chunk boundaries
+        start_line = max(1, line_num - context_lines)
+        end_line = min(len(doc_lines), line_num + context_lines)
         
-        # Add match line
-        chunk_lines.append(f">>> {line_content}")
-        chunk_lines.append("")
+        # Extract lines (convert to 0-based indexing)
+        chunk_lines = doc_lines[start_line-1:end_line]
+        content = '\n'.join(chunk_lines)
         
-        # Add context after
-        if context_after:
-            chunk_lines.append("Context after:")
-            for line in context_after:
-                chunk_lines.append(f"    {line}")
+        # Skip if too short
+        if len(content.strip()) < min_length:
+            return None
         
-        chunk_lines.append("=" * 50)
+        # Truncate if too long
+        if len(content) > max_length:
+            content = content[:max_length] + "..."
         
-        return "\n".join(chunk_lines)
+        # Create chunk object
+        chunk = {
+            "content": content.strip(),
+            "start_line": start_line,
+            "end_line": end_line,
+            "match_line": line_num,
+            "match_info": {
+                "type": match.get("type", "unknown"),
+                "matched_text": match.get("matched_text", ""),
+                "keyword": match.get("keyword"),
+                "pattern": match.get("pattern")
+            },
+            "metadata": {
+                "lines_count": end_line - start_line + 1,
+                "char_count": len(content),
+                "context_lines_before": line_num - start_line,
+                "context_lines_after": end_line - line_num
+            }
+        }
+        
+        # Mark lines as processed
+        for line in range(start_line, end_line + 1):
+            processed_lines.add(line)
+        
+        return chunk
 
-    def _format_context_line(self, line_text: str) -> str:
-        """
-        Format a context line, potentially highlighting medical terms.
-        """
-        # For now, just return the line as-is
-        # Could add medical term detection/highlighting here
-        return line_text
+    def _create_summary_chunks(self, document: str) -> List[Dict[str, Any]]:
+        """Create summary chunks when no matches are found."""
+        doc_lines = document.split('\n')
+        chunks = []
+        
+        CHUNK_SIZE = int(os.getenv("SUMMARY_CHUNK_SIZE", "10"))  # Lines per chunk
+        
+        for i in range(0, len(doc_lines), CHUNK_SIZE):
+            chunk_lines = doc_lines[i:i + CHUNK_SIZE]
+            content = '\n'.join(chunk_lines).strip()
+            
+            if content:
+                chunk = {
+                    "content": content,
+                    "start_line": i + 1,
+                    "end_line": min(i + CHUNK_SIZE, len(doc_lines)),
+                    "match_line": None,
+                    "match_info": {"type": "summary", "matched_text": None},
+                    "metadata": {
+                        "lines_count": len(chunk_lines),
+                        "char_count": len(content),
+                        "is_summary": True
+                    }
+                }
+                chunks.append(chunk)
+        
+        # Limit summary chunks
+        MAX_SUMMARY_CHUNKS = int(os.getenv("MAX_SUMMARY_CHUNKS", "5"))
+        return chunks[:MAX_SUMMARY_CHUNKS]
 
-    def _contains_medical_info(self, text: str) -> bool:
-        """
-        Check if text contains medical information that needs context.
-        """
-        medical_indicators = [
-            r'\b\d+\s*(?:mg|mcg|ml|cc|units?|iu)\b',  # Dosages
-            r'(?:blood\s+pressure|bp|heart\s+rate|hr|temperature|temp)',  # Vitals
-            r'(?:diagnosis|diagnosed|treatment|prescribed)',  # Clinical terms
-            r'(?:daily|bid|tid|qid|prn)',  # Frequencies
-        ]
+    def _merge_overlapping_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge chunks that overlap significantly."""
+        if len(chunks) <= 1:
+            return chunks
         
-        text_lower = text.lower()
-        for pattern in medical_indicators:
-            if re.search(pattern, text_lower, re.IGNORECASE):
-                return True
-        return False
+        merged_chunks = []
+        
+        # Sort by start line
+        chunks.sort(key=lambda x: x.get("start_line", 0))
+        
+        current_chunk = chunks[0]
+        
+        for next_chunk in chunks[1:]:
+            current_end = current_chunk.get("end_line", 0)
+            next_start = next_chunk.get("start_line", 0)
+            
+            # Check if chunks overlap significantly (at least 2 lines)
+            overlap = max(0, current_end - next_start + 1)
+            
+            if overlap >= 2:
+                # Merge chunks
+                merged_content = self._merge_chunk_content(current_chunk, next_chunk)
+                
+                current_chunk = {
+                    "content": merged_content,
+                    "start_line": current_chunk.get("start_line"),
+                    "end_line": next_chunk.get("end_line"),
+                    "match_line": current_chunk.get("match_line"),  # Keep first match line
+                    "match_info": self._merge_match_info(current_chunk, next_chunk),
+                    "metadata": {
+                        "lines_count": next_chunk.get("end_line", 0) - current_chunk.get("start_line", 0) + 1,
+                        "char_count": len(merged_content),
+                        "merged": True,
+                        "original_chunks": 2
+                    }
+                }
+            else:
+                # No overlap, keep current chunk and move to next
+                merged_chunks.append(current_chunk)
+                current_chunk = next_chunk
+        
+        # Add the last chunk
+        merged_chunks.append(current_chunk)
+        
+        return merged_chunks
 
-    def _extract_medical_summary(self, chunk_lines: List[str], 
-                                match_idx: int) -> List[str]:
-        """
-        Extract key medical information from the chunk.
-        """
-        summary = []
-        chunk_text = ' '.join(chunk_lines).lower()
+    def _merge_chunk_content(self, chunk1: Dict[str, Any], chunk2: Dict[str, Any]) -> str:
+        """Merge content from two overlapping chunks."""
+        content1 = chunk1.get("content", "")
+        content2 = chunk2.get("content", "")
         
-        # Look for medications with dosages
-        med_pattern = r'\b(\w+)\s+(\d+(?:\.\d+)?\s*(?:mg|mcg|ml|units?|iu))\b'
-        medications = re.findall(med_pattern, chunk_text, re.IGNORECASE)
-        if medications:
-            unique_meds = list(dict.fromkeys([f"{med[0].title()} {med[1]}" for med in medications]))
-            if unique_meds:
-                summary.append(f"Medications: {', '.join(unique_meds[:5])}")
+        # Simple merge - combine unique lines
+        lines1 = content1.split('\n')
+        lines2 = content2.split('\n')
         
-        # Look for vital signs
-        vitals = []
+        # Create a set to track unique lines while preserving order
+        seen_lines = set()
+        merged_lines = []
         
-        # Blood pressure
-        bp_pattern = r'(?:blood\s+pressure|bp)[\s:]+(\d{2,3}/\d{2,3})'
-        bp_matches = re.findall(bp_pattern, chunk_text, re.IGNORECASE)
-        if bp_matches:
-            vitals.append(f"BP: {bp_matches[0]}")
+        for line in lines1 + lines2:
+            line_key = line.strip().lower()
+            if line_key and line_key not in seen_lines:
+                seen_lines.add(line_key)
+                merged_lines.append(line)
         
-        # Heart rate
-        hr_pattern = r'(?:heart\s+rate|hr|pulse)[\s:]+(\d{2,3})'
-        hr_matches = re.findall(hr_pattern, chunk_text, re.IGNORECASE)
-        if hr_matches:
-            vitals.append(f"HR: {hr_matches[0]}")
+        return '\n'.join(merged_lines)
+
+    def _merge_match_info(self, chunk1: Dict[str, Any], chunk2: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge match information from two chunks."""
+        match1 = chunk1.get("match_info", {})
+        match2 = chunk2.get("match_info", {})
         
-        # Temperature
-        temp_pattern = r'(?:temperature|temp)[\s:]+(\d{2,3}(?:\.\d)?)'
-        temp_matches = re.findall(temp_pattern, chunk_text, re.IGNORECASE)
-        if temp_matches:
-            vitals.append(f"Temp: {temp_matches[0]}°")
+        # Combine matched texts
+        texts = [match1.get("matched_text"), match2.get("matched_text")]
+        texts = [t for t in texts if t and t.strip()]
         
-        if vitals:
-            summary.append(f"Vital Signs: {', '.join(vitals)}")
+        return {
+            "type": "merged",
+            "matched_text": " | ".join(texts) if texts else None,
+            "original_types": [match1.get("type"), match2.get("type")]
+        }
+
+    def _validate_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate and clean chunk results."""
+        valid_chunks = []
         
-        # Look for diagnoses
-        diag_keywords = ['diagnosis', 'diagnosed with', 'assessment']
-        for keyword in diag_keywords:
-            if keyword in chunk_text:
-                summary.append("Contains diagnostic information")
-                break
+        for chunk in chunks:
+            # Ensure required fields
+            if not isinstance(chunk, dict):
+                continue
+                
+            # Validate chunk structure
+            required_fields = ["content", "start_line", "end_line"]
+            if not all(field in chunk for field in required_fields):
+                logger.warning(f"Invalid chunk structure, skipping: {list(chunk.keys())}")
+                continue
+            
+            # Validate content is not empty
+            if not chunk.get("content", "").strip():
+                continue
+            
+            # Clean and validate data types
+            try:
+                chunk["start_line"] = int(chunk["start_line"])
+                chunk["end_line"] = int(chunk["end_line"])
+                chunk["content"] = str(chunk["content"])
+                
+                # Ensure reasonable line numbers
+                if chunk["start_line"] <= 0 or chunk["end_line"] < chunk["start_line"]:
+                    logger.warning(f"Invalid line numbers in chunk: {chunk['start_line']}-{chunk['end_line']}")
+                    continue
+                
+                valid_chunks.append(chunk)
+                
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid chunk data types, skipping: {e}")
+                continue
         
-        # Look for dates
-        date_pattern = r'\b\d{1,2}/\d{1,2}/\d{2,4}\b'
-        dates = re.findall(date_pattern, chunk_text)
-        if dates:
-            summary.append(f"Dates mentioned: {', '.join(list(dict.fromkeys(dates))[:3])}")
+        return valid_chunks
+
+    def _create_chunk_summary(self, chunks: List[Dict[str, Any]]) -> str:
+        """Create a text summary of extracted chunks."""
+        if not chunks:
+            return "No content chunks were extracted."
         
-        return summary
+        summary_lines = [f"Extracted {len(chunks)} content chunks:"]
+        
+        total_chars = sum(len(c.get("content", "")) for c in chunks)
+        avg_size = total_chars / len(chunks)
+        
+        summary_lines.append(f"Total content: {total_chars} characters")
+        summary_lines.append(f"Average chunk size: {avg_size:.1f} characters")
+        
+        # Show line coverage
+        all_lines = set()
+        for chunk in chunks:
+            start = chunk.get("start_line", 0)
+            end = chunk.get("end_line", 0)
+            all_lines.update(range(start, end + 1))
+        
+        if all_lines:
+            min_line = min(all_lines)
+            max_line = max(all_lines)
+            summary_lines.append(f"Line coverage: {min_line}-{max_line} ({len(all_lines)} lines)")
+        
+        return "\n".join(summary_lines)
+
+
+# --- Module-level app creation for Health Universe deployment ---
+agent = ChunkExtractionAgent()
+agent_card = agent.create_agent_card()
+task_store = InMemoryTaskStore()
+request_handler = DefaultRequestHandler(
+    agent_executor=agent,
+    task_store=task_store
+)
+
+app = A2AStarletteApplication(
+    agent_card=agent_card,  # A2A Spec: MUST make AgentCard available
+    http_handler=request_handler  # Handles RPC methods
+).build()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8004))
+    print(f"🚀 Starting {agent.get_agent_name()}")
+    print(f"📍 Available at: http://localhost:{port}")
+    print(f"🔍 Agent Card: http://localhost:{port}/.well-known/agentcard.json")
+    uvicorn.run(app, host="0.0.0.0", port=port)

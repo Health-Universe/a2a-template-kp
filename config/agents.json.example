@@ -1,7 +1,7 @@
 {
-  "_comment": "IMPORTANT: HealthUniverse Deployment Process",
+  "_comment": "IMPORTANT: Health Universe Deployment Process",
   "_deployment_steps": [
-    "1. Deploy all individual agents to HealthUniverse first",
+    "1. Deploy all individual agents to Health Universe first",
     "2. Each agent will get a unique xxx-xxx-xxx code (e.g., vey-vou-nam)",
     "3. The agent URL format is: https://apps.healthuniverse.com/xxx-xxx-xxx",
     "4. Update this file with the actual agent IDs and URLs",
@@ -12,44 +12,57 @@
   ],
   "_note": "Each agent runs in its own Kubernetes container and cannot modify this file at runtime",
   "agents": {
-    "grep-agent": {
+    "keyword": {
       "url": "https://apps.healthuniverse.com/xxx-xxx-xxx",
-      "name": "Grep Search Agent",
-      "description": "Searches for patterns in files",
-      "skills": ["search", "pattern-matching"],
-      "_replace_with": "Replace xxx-xxx-xxx with actual agent ID from HealthUniverse (e.g., vey-vou-nam)"
+      "name": "Keyword Generator Agent",
+      "description": "Generates relevant search keywords and patterns from documents.",
+      "skills": ["generate_keywords"],
+      "_replace_with": "Replace xxx-xxx-xxx with actual agent ID from Health Universe (e.g., key-wrd-gen)"
     },
-    "chunk-agent": {
+    "grep": {
       "url": "https://apps.healthuniverse.com/yyy-yyy-yyy",
-      "name": "Document Chunk Agent",
-      "description": "Splits documents into manageable chunks",
-      "skills": ["document-processing", "chunking"],
-      "_replace_with": "Replace yyy-yyy-yyy with actual agent ID from HealthUniverse"
+      "name": "Document Search Agent",
+      "description": "Searches documents using keywords and patterns to find relevant content.",
+      "skills": ["search_document"],
+      "_replace_with": "Replace yyy-yyy-yyy with actual agent ID from Health Universe (e.g., doc-srch-grp)"
     },
-    "summarize-agent": {
+    "chunk": {
       "url": "https://apps.healthuniverse.com/zzz-zzz-zzz",
-      "name": "Summarization Agent",
-      "description": "Creates summaries of text content",
-      "skills": ["summarization", "text-analysis"],
-      "_replace_with": "Replace zzz-zzz-zzz with actual agent ID from HealthUniverse"
+      "name": "Content Chunk Extractor",
+      "description": "Extracts contextual chunks around search matches for further analysis.",
+      "skills": ["extract_chunks"],
+      "_replace_with": "Replace zzz-zzz-zzz with actual agent ID from Health Universe (e.g., cnt-chnk-ext)"
     },
-    "keyword-agent": {
-      "url": "https://apps.healthuniverse.com/aaa-bbb-ccc",
-      "name": "Keyword Extraction Agent",
-      "description": "Extracts keywords and key phrases from text",
-      "skills": ["keyword-extraction", "nlp"],
-      "_replace_with": "Replace aaa-bbb-ccc with actual agent ID from HealthUniverse"
+    "summarizer": {
+      "url": "https://apps.healthuniverse.com/www-www-www",
+      "name": "Document Summarizer",
+      "description": "Analyzes content chunks and generates comprehensive summaries.",
+      "skills": ["summarize_content"],
+      "_replace_with": "Replace www-www-www with actual agent ID from Health Universe (e.g., doc-sum-anl)"
     }
   },
   "_local_development": {
     "comment": "For local development, you can use localhost URLs",
     "example": {
-      "grep-agent": {
-        "url": "http://localhost:8001"
-      },
-      "chunk-agent": {
+      "keyword": {
         "url": "http://localhost:8002"
+      },
+      "grep": {
+        "url": "http://localhost:8003"
+      },
+      "chunk": {
+        "url": "http://localhost:8004"
+      },
+      "summarizer": {
+        "url": "http://localhost:8005"
       }
     }
+  },
+  "_health_universe_notes": {
+    "transport": "Most Health Universe agents use JSON-RPC on root endpoint",
+    "authentication": "Private apps require proper authentication headers",
+    "testing": "Make apps public during development/testing phase",
+    "agent_card": "Each agent must serve /.well-known/agentcard.json",
+    "deployment": "Use module-level app variable for proper discovery"
   }
 }

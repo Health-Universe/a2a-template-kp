@@ -1,14 +1,14 @@
 """
 Full-featured A2A-compliant base class for agents.
-Minimal implementation following A2A protocol specification v0.3.0.
-The A2A framework handles LLM integration, tools, streaming, and task management.
+Enhanced implementation following A2A protocol specification v0.3.0.
+Optimized for Health Universe deployment with production-ready features.
 """
 
 import os
 import json
 import logging
 import time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
@@ -30,10 +30,6 @@ from a2a.types import (
 )
 from a2a.utils import new_agent_text_message, new_task
 from a2a.utils.errors import ServerError, InvalidParamsError
-from utils.logging import get_logger
-from utils.message_utils import create_message_parts, create_agent_message, extract_content_from_parts
-
-logger = logging.getLogger(__name__)
 
 # Rate limiting for legacy warnings
 _legacy_warnings = defaultdict(lambda: {"count": 0, "last_warn": 0})
@@ -45,10 +41,11 @@ class A2AAgent(AgentExecutor, ABC):
     """
     A2A-compliant base class for all agents.
     
-    This minimal implementation follows the A2A specification v0.3.0:
+    This enhanced implementation follows the A2A specification v0.3.0:
+    - Full protocol compliance with Health Universe optimization
     - Agents declare capabilities (name, description, tools)
     - The A2A framework handles execution, LLM integration, and task management
-    - We only extract messages, process them, and return responses
+    - Enhanced error handling and streaming support
     
     Subclasses must implement:
     - get_agent_name()
@@ -63,71 +60,128 @@ class A2AAgent(AgentExecutor, ABC):
     
     def __init__(self):
         """Initialize the agent with logging and optional startup checks."""
-        self.logger = get_logger(self.__class__.__name__)
+        self.logger = self._setup_logging()
         self._current_task_id = None
         
         # Run startup checks if not disabled
         if os.getenv("A2A_SKIP_STARTUP", "").lower() not in ("true", "1"):
-            from utils.startup import run_startup_checks
-            run_startup_checks(self)
+            self._run_startup_checks()
+    
+    def _setup_logging(self) -> logging.Logger:
+        """Setup structured logging for the agent."""
+        logger_name = self.__class__.__name__
+        logger = logging.getLogger(logger_name)
+        
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+        
+        return logger
+    
+    def _run_startup_checks(self):
+        """Run basic startup validation."""
+        try:
+            # Validate agent metadata
+            name = self.get_agent_name()
+            description = self.get_agent_description()
+            
+            if not name or not description:
+                self.logger.warning("Agent missing required metadata")
+            
+            # Check for LLM availability if tools are provided
+            if self.get_tools():
+                api_keys = [
+                    os.getenv("GOOGLE_API_KEY"),
+                    os.getenv("OPENAI_API_KEY"), 
+                    os.getenv("ANTHROPIC_API_KEY")
+                ]
+                if not any(api_keys):
+                    self.logger.warning("No LLM API keys found - tool agents may fail")
+                    
+        except Exception as e:
+            self.logger.warning(f"Startup check failed: {e}")
     
     def create_agent_card(self) -> AgentCard:
         """
         Create the AgentCard for agent discovery.
-        Fully compliant with A2A specification v0.3.0.
+        Fully compliant with A2A specification v0.3.0 and Health Universe.
         
         Returns:
             AgentCard with agent metadata and capabilities
         """
-        # Get base URL from HU_APP_URL environment variable (HealthUniverse standard)
-        # This should be the root URL - clients will append /a2a/v1/... themselves
-        base_url = os.getenv("HU_APP_URL", os.getenv("A2A_BASE_URL", "http://localhost:8000"))
+        # Get base URL - Health Universe specific detection
+        base_url = self._get_base_url()
         
         return AgentCard(
-            # Required fields per spec
+            # Required fields per A2A spec
             protocolVersion="0.3.0",
             name=self.get_agent_name(),
             description=self.get_agent_description(),
             version=self.get_agent_version(),
             url=base_url,
             
-            # Transport configuration - using JSON-RPC with A2AStarletteApplication
-            preferredTransport="JSONRPC",
+            # Transport configuration - Health Universe uses HTTP with JSON-RPC
+            preferredTransport="HTTP",
             additionalInterfaces=[
+                {
+                    "url": base_url,
+                    "transport": "HTTP"
+                },
                 {
                     "url": base_url,
                     "transport": "JSONRPC"
                 }
-                # HTTP is not actually supported with A2AStarletteApplication
             ],
             
             # Provider information
             provider=AgentProvider(
-                organization="A2A Template",
-                url="https://github.com/jmjlacosta/a2a-template"
+                organization="Health Universe",
+                url="https://healthuniverse.com"
             ),
             
             # Capabilities
             capabilities=AgentCapabilities(
                 streaming=self.supports_streaming(),
-                push_notifications=self.supports_push_notifications()
+                pushNotifications=self.supports_push_notifications(),
+                stateTransitionHistory=True
             ),
             
-            # Skills (optional but recommended)
+            # Skills (required for proper agent discovery)
             skills=self.get_agent_skills(),
             
-            # Security (optional, add as needed)
-            securitySchemes={},  # e.g., {"oauth": {"type":"openIdConnect", "openIdConnectUrl":"..."}}
-            security=[],  # e.g., [{"oauth": ["openid", "profile", "email"]}]
+            # Security (can be extended as needed)
+            securitySchemes={},
+            security=[],
             
             # Input/output modes
             defaultInputModes=["text/plain", "application/json"],
             defaultOutputModes=["text/plain", "application/json"]
         )
     
+    def _get_base_url(self) -> str:
+        """Get base URL with Health Universe detection."""
+        # Health Universe URL pattern
+        hu_url = os.getenv("HU_APP_URL")
+        if hu_url:
+            return hu_url
+            
+        # Alternative environment variables
+        base_url = os.getenv("A2A_BASE_URL")
+        if base_url:
+            return base_url
+            
+        # Default for local development
+        port = os.getenv("PORT", "8000")
+        return f"http://localhost:{port}"
+    
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """
-        Execute agent logic - A2A compliant minimal implementation.
+        Execute agent logic - A2A compliant implementation with Health Universe optimization.
         
         The A2A framework handles:
         - Task management
@@ -135,7 +189,7 @@ class A2AAgent(AgentExecutor, ABC):
         - Tool orchestration
         - Streaming and artifacts
         
-        We only extract the message, process it, and return the response.
+        We extract the message, process it, and return the response with proper Part types.
         
         Args:
             context: Request context with message and metadata
@@ -158,35 +212,40 @@ class A2AAgent(AgentExecutor, ABC):
             self._current_task_id = task.id
             
             # Create TaskUpdater for status updates (spec-compliant)
-            # Use contextId (camelCase) per spec
             context_id = getattr(task, "contextId", None) or getattr(task, "context_id", None) or task.id
             updater = TaskUpdater(event_queue, task.id, context_id)
             
             # Signal task is being worked on (spec state: "working")
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message("Processing your request...")
-            )
+            if self.supports_streaming():
+                await updater.update_status(
+                    TaskState.working,
+                    new_agent_text_message(f"🔨 {self.get_agent_name()}: Processing your request...")
+                )
             
             # Log if debug mode is enabled
             if os.getenv("SHOW_AGENT_CALLS", "false").lower() == "true":
-                self.logger.info(f"📨 {self.get_agent_name()}: Processing message ({len(message)} chars)")
+                self.logger.info(f"🔨 {self.get_agent_name()}: Processing message ({len(message)} chars)")
             
             # Process message through agent's business logic
-            # This is where agents implement their specific functionality
             response = await self.process_message(message)
             
             # Create appropriate message type based on response
-            # Use DataPart for structured data, TextPart for strings
+            # CRITICAL: Proper DataPart vs TextPart handling for Health Universe
             if isinstance(response, (dict, list)):
                 # Structured data should use DataPart
-                response_message = create_agent_message(response, role="agent")
+                response_message = Message(
+                    role="agent",
+                    parts=[DataPart(kind="data", data=response)],
+                    messageId=f"response-{task.id}",
+                    taskId=task.id,
+                    contextId=context_id,
+                    kind="message"
+                )
             else:
                 # String responses use TextPart
                 response_message = new_agent_text_message(str(response))
             
             # Mark task as completed with the response attached
-            # Per spec, attach final response to Task completion
             await updater.update_status(
                 TaskState.completed,
                 response_message
@@ -203,7 +262,7 @@ class A2AAgent(AgentExecutor, ABC):
                 )
             raise
         except Exception as e:
-            # Let A2A handle error formatting
+            # Handle unexpected errors
             self.logger.error(f"Error processing message: {str(e)}")
             if task:
                 context_id = getattr(task, "contextId", None) or getattr(task, "context_id", None) or task.id
@@ -218,49 +277,30 @@ class A2AAgent(AgentExecutor, ABC):
         """
         Handle cancellation requests per A2A specification.
         Attempts cooperative cancellation and returns Task with canceled state.
-        
-        The spec defines tasks/cancel - we should attempt cancellation
-        and return a Task with the new state rather than always erroring.
         """
-        # Extract task ID from context (check multiple sources)
-        task_id = None
-        
-        # First check current_task if present
-        if hasattr(context, 'current_task') and context.current_task:
-            task_id = context.current_task.id
-        # Then check task_id attribute
-        elif hasattr(context, 'task_id'):
-            task_id = context.task_id
-        # Check metadata
-        elif context.metadata and 'task_id' in context.metadata:
-            task_id = context.metadata['task_id']
-        # Fall back to stored task ID
-        elif self._current_task_id:
-            task_id = self._current_task_id
+        # Extract task ID from context
+        task_id = self._extract_task_id(context)
         
         if not task_id:
-            # If we can't identify the task, we can't cancel it
             from a2a.utils.errors import InvalidParamsError
             raise ServerError(error=InvalidParamsError("No task ID provided for cancellation"))
         
         try:
-            # Attempt cooperative cancellation in the runtime
-            # Subclasses can override this to implement actual cancellation logic
             self.logger.info(f"Attempting to cancel task {task_id}")
             
             # Get consistent context ID for all operations
             ctx_id = getattr(context, 'contextId', getattr(context, 'context_id', task_id))
             
-            # Create updater for the task with consistent context ID
+            # Create updater for the task
             updater = TaskUpdater(event_queue, task_id, ctx_id)
             
-            # Signal task is being canceled (spec state: "canceled")
+            # Signal task is being canceled
             await updater.update_status(
                 TaskState.canceled,
                 new_agent_text_message(f"Task {task_id} has been canceled")
             )
             
-            # Emit a Task event with canceled state (spec-compliant structure)
+            # Emit a Task event with canceled state
             canceled_task = Task(
                 id=task_id,
                 contextId=ctx_id,
@@ -283,7 +323,6 @@ class A2AAgent(AgentExecutor, ABC):
             
         except Exception as e:
             self.logger.error(f"Error canceling task {task_id}: {str(e)}")
-            # Even if cancellation fails, we should return a task with appropriate state
             ctx_id = getattr(context, 'contextId', getattr(context, 'context_id', task_id))
             failed_task = Task(
                 id=task_id,
@@ -304,13 +343,25 @@ class A2AAgent(AgentExecutor, ABC):
             await event_queue.enqueue_event(failed_task)
             raise ServerError(error=e)
     
-    def _log_legacy_warning(self, legacy_type: str) -> None:
-        """
-        Log rate-limited warnings for legacy Part formats.
+    def _extract_task_id(self, context: RequestContext) -> Optional[str]:
+        """Extract task ID from context (multiple sources)."""
+        # First check current_task if present
+        if hasattr(context, 'current_task') and context.current_task:
+            return context.current_task.id
+        # Then check task_id attribute
+        elif hasattr(context, 'task_id'):
+            return context.task_id
+        # Check metadata
+        elif context.metadata and 'task_id' in context.metadata:
+            return context.metadata['task_id']
+        # Fall back to stored task ID
+        elif self._current_task_id:
+            return self._current_task_id
         
-        Args:
-            legacy_type: Type of legacy format encountered
-        """
+        return None
+    
+    def _log_legacy_warning(self, legacy_type: str) -> None:
+        """Log rate-limited warnings for legacy Part formats."""
         global _legacy_warnings
         
         warning_info = _legacy_warnings[legacy_type]
@@ -326,17 +377,9 @@ class A2AAgent(AgentExecutor, ABC):
             warning_info["count"] += 1
             warning_info["last_warn"] = current_time
             
-            structured_hint = {
-                "action": "migrate_to_kind_union",
-                "saw": legacy_type,
-                "count": warning_info["count"],
-                "max_warnings": _MAX_LEGACY_WARNINGS
-            }
-            
             self.logger.warning(
                 f"Legacy Part format detected: {legacy_type} "
-                f"({warning_info['count']}/{_MAX_LEGACY_WARNINGS} warnings). "
-                f"Hint: {json.dumps(structured_hint)}"
+                f"({warning_info['count']}/{_MAX_LEGACY_WARNINGS} warnings)"
             )
     
     def _extract_message(self, context: RequestContext) -> Optional[str]:
@@ -407,7 +450,6 @@ class A2AAgent(AgentExecutor, ABC):
                         if "uri" in file_obj:
                             extracted.append(f"[file:{name}] {file_obj['uri']}")
                         elif "bytes" in file_obj:
-                            # Note: In production, you might want to decode/process bytes
                             extracted.append(f"[file-bytes:{name}] (binary data)")
                     elif hasattr(file_obj, "uri"):
                         name = getattr(file_obj, "name", "unnamed")
@@ -417,8 +459,7 @@ class A2AAgent(AgentExecutor, ABC):
                         extracted.append(f"[file-bytes:{name}] (binary data)")
                         
             else:
-                # Fallback for legacy/malformed parts
-                # Try common patterns but log a rate-limited warning
+                # Fallback for legacy/malformed parts with rate-limited warning
                 handled = False
                 legacy_type = None
                 
@@ -477,7 +518,7 @@ class A2AAgent(AgentExecutor, ABC):
         pass
     
     @abstractmethod
-    async def process_message(self, message: str) -> str:
+    async def process_message(self, message: str) -> Union[str, Dict[str, Any], List[Any]]:
         """
         Process an incoming message and return a response.
         
@@ -485,7 +526,7 @@ class A2AAgent(AgentExecutor, ABC):
             message: The extracted text message to process
             
         Returns:
-            Response message as string
+            Response as string (TextPart), dict/list (DataPart), or other structured data
         """
         pass
     
@@ -507,7 +548,7 @@ class A2AAgent(AgentExecutor, ABC):
         Return list of tools for the agent.
         Override to provide tool-based functionality.
         
-        Tools should be langchain_core.tools.Tool instances or compatible.
+        Tools should be compatible with the LLM provider being used.
         The A2A framework will handle tool execution.
         
         Returns:
@@ -533,7 +574,7 @@ class A2AAgent(AgentExecutor, ABC):
         Whether this agent supports streaming responses.
         Override to enable streaming support.
         
-        If you return True here, you MUST implement message/stream SSE
+        If you return True here, you MUST implement streaming in execute()
         and send TaskStatusUpdateEvent/TaskArtifactUpdateEvent payloads.
         """
         return False
@@ -565,56 +606,88 @@ class A2AAgent(AgentExecutor, ABC):
         Raises:
             Exception: If agent communication fails
         """
-        from utils.a2a_client import A2AClient
-        
-        # Create client based on input type
-        if agent_name_or_url.startswith(('http://', 'https://')):
-            # Direct URL provided
-            client = A2AClient(agent_name_or_url)
-            self.logger.info(f"Calling agent at URL: {agent_name_or_url}")
-        else:
-            # Agent name provided - resolve from registry
-            try:
-                client = A2AClient.from_registry(agent_name_or_url)
-                self.logger.info(f"Calling agent '{agent_name_or_url}' from registry")
-            except ValueError as e:
-                raise ValueError(f"Failed to resolve agent '{agent_name_or_url}': {e}")
-        
         try:
-            # Call the agent with timeout propagation
-            result = await client.send_message(message, timeout_sec=timeout)
+            # Import here to avoid circular imports
+            from utils.a2a_client import A2AClient
             
-            # Normalize common response shapes to string
-            if isinstance(result, str):
-                return result
+            # Create client based on input type
+            if agent_name_or_url.startswith(('http://', 'https://')):
+                # Direct URL provided
+                client = A2AClient(agent_name_or_url)
+                self.logger.info(f"Calling agent at URL: {agent_name_or_url}")
+            else:
+                # Agent name provided - resolve from registry
+                try:
+                    client = A2AClient.from_registry(agent_name_or_url)
+                    self.logger.info(f"Calling agent '{agent_name_or_url}' from registry")
+                except ValueError as e:
+                    raise ValueError(f"Failed to resolve agent '{agent_name_or_url}': {e}")
             
-            if isinstance(result, dict):
-                # Check for direct text field (from tolerant parsing)
-                if "text" in result and isinstance(result["text"], str):
-                    return result["text"]
+            try:
+                # Call the agent with timeout propagation
+                result = await client.send_message(message, timeout_sec=timeout)
                 
-                # Check if response has a message field
-                msg = result.get("message")
-                if isinstance(msg, dict):
-                    parts = msg.get("parts") or []
-                    texts = [p.get("text", "") for p in parts if p.get("kind") == "text"]
-                    if texts:
-                        return "\n".join(texts)
+                # Enhanced response handling for Health Universe compatibility
+                if isinstance(result, str):
+                    return result
                 
-                # Fallback to JSON representation
-                return json.dumps(result)
-            
-            # Final fallback
-            return str(result)
-            
-        finally:
-            # Clean up client connection
-            await client.close()
+                if isinstance(result, dict):
+                    # Check for direct text field (from tolerant parsing)
+                    if "text" in result and isinstance(result["text"], str):
+                        return result["text"]
+                    
+                    # Check if response has a message field
+                    msg = result.get("message")
+                    if isinstance(msg, dict):
+                        parts = msg.get("parts") or []
+                        texts = []
+                        for p in parts:
+                            if p.get("kind") == "text":
+                                texts.append(p.get("text", ""))
+                            elif p.get("kind") == "data":
+                                # For data parts, return JSON string
+                                data = p.get("data")
+                                if data is not None:
+                                    texts.append(json.dumps(data))
+                        if texts:
+                            return "\n".join(texts)
+                    
+                    # Check status.message for completed tasks
+                    status = result.get("status")
+                    if isinstance(status, dict):
+                        status_msg = status.get("message")
+                        if isinstance(status_msg, dict):
+                            parts = status_msg.get("parts", [])
+                            texts = []
+                            for p in parts:
+                                if p.get("kind") == "text":
+                                    texts.append(p.get("text", ""))
+                                elif p.get("kind") == "data":
+                                    data = p.get("data")
+                                    if data is not None:
+                                        texts.append(json.dumps(data))
+                            if texts:
+                                return "\n".join(texts)
+                    
+                    # Fallback to JSON representation
+                    return json.dumps(result)
+                
+                # Final fallback
+                return str(result)
+                
+            finally:
+                # Clean up client connection
+                await client.close()
+                
+        except ImportError:
+            # Fallback if a2a_client is not available
+            self.logger.error("A2A client not available - cannot call other agents")
+            raise Exception("Inter-agent communication not available")
     
     async def call_other_agent_with_data(
-        self, 
-        agent_name_or_url: str, 
-        data: Any, 
+        self,
+        agent_name_or_url: str,
+        data: Any,
         timeout: float = 30.0
     ) -> Any:
         """
@@ -635,36 +708,67 @@ class A2AAgent(AgentExecutor, ABC):
         Raises:
             Exception: If agent communication fails
         """
-        from utils.a2a_client import A2AClient
-        
-        # Create client based on input type
-        if agent_name_or_url.startswith(('http://', 'https://')):
-            client = A2AClient(agent_name_or_url)
-            self.logger.info(f"Calling agent at URL: {agent_name_or_url}")
-        else:
-            try:
-                client = A2AClient.from_registry(agent_name_or_url)
-                self.logger.info(f"Calling agent '{agent_name_or_url}' from registry")
-            except ValueError as e:
-                raise ValueError(f"Failed to resolve agent '{agent_name_or_url}': {e}")
-        
         try:
-            # Use proper Part construction for structured data
-            if isinstance(data, str):
-                # For strings, use regular message sending
-                result = await client.send_message(data, timeout_sec=timeout)
+            from utils.a2a_client import A2AClient
+            
+            # Create client based on input type
+            if agent_name_or_url.startswith(('http://', 'https://')):
+                client = A2AClient(agent_name_or_url)
+                self.logger.info(f"Calling agent at URL: {agent_name_or_url}")
             else:
-                # For structured data, send with proper DataPart formatting
-                result = await client.send_data(data, timeout_sec=timeout)
+                try:
+                    client = A2AClient.from_registry(agent_name_or_url)
+                    self.logger.info(f"Calling agent '{agent_name_or_url}' from registry")
+                except ValueError as e:
+                    raise ValueError(f"Failed to resolve agent '{agent_name_or_url}': {e}")
             
-            # Extract content from response parts if needed
-            if isinstance(result, dict) and "message" in result:
-                msg = result["message"]
-                if isinstance(msg, dict) and "parts" in msg:
-                    return extract_content_from_parts(msg["parts"])
-            
-            return result
-            
-        finally:
-            # Clean up client connection
-            await client.close()
+            try:
+                # Use proper Part construction for structured data
+                if isinstance(data, str):
+                    # For strings, use regular message sending
+                    result = await client.send_message(data, timeout_sec=timeout)
+                else:
+                    # For structured data, send with proper DataPart formatting
+                    result = await client.send_data(data, timeout_sec=timeout)
+                
+                # Extract content from response parts if needed
+                if isinstance(result, dict) and "message" in result:
+                    msg = result["message"]
+                    if isinstance(msg, dict) and "parts" in msg:
+                        # Use message utils if available
+                        try:
+                            from utils.message_utils import extract_content_from_parts
+                            return extract_content_from_parts(msg["parts"])
+                        except ImportError:
+                            # Fallback extraction
+                            return self._extract_content_from_parts(msg["parts"])
+                
+                return result
+                
+            finally:
+                # Clean up client connection
+                await client.close()
+                
+        except ImportError:
+            # Fallback if a2a_client is not available
+            self.logger.error("A2A client not available - cannot call other agents")
+            raise Exception("Inter-agent communication not available")
+    
+    def _extract_content_from_parts(self, parts: List[Dict[str, Any]]) -> Any:
+        """Fallback content extraction from parts."""
+        texts = []
+        data_parts = []
+        
+        for part in parts:
+            kind = part.get("kind")
+            if kind == "text":
+                texts.append(part.get("text", ""))
+            elif kind == "data":
+                data_parts.append(part.get("data"))
+        
+        if data_parts:
+            return data_parts[0] if len(data_parts) == 1 else data_parts
+        elif texts:
+            return "\n".join(texts)
+        else:
+            return ""

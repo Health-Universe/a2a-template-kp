@@ -1,398 +1,476 @@
 """
-ADK-first LLM wrapper with multi-provider support via LiteLLM.
-~250 LOC - Auto-selects Anthropic/OpenAI/Google based on API keys.
-Ensures consistent temperature/max_tokens propagation across all providers.
+LLM Utilities for A2A Agents
+Multi-provider LLM integration with Health Universe compatibility.
 """
 
 import os
 import json
-import time
-import random
-import logging
 import asyncio
-from typing import Dict, Any, Optional, Tuple, List
-from google.adk.agents.llm_agent import LlmAgent
-from google.adk.runners import Runner
-from google.adk.artifacts import InMemoryArtifactService
-from google.adk.sessions import InMemorySessionService
-from google.adk.memory import InMemoryMemoryService
-from google.genai import types
-
-try:
-    from google.adk.models.lite_llm import LiteLlm
-except ImportError:
-    raise ImportError(
-        "LiteLLM support not available. Install with: pip install google-adk litellm"
-    )
-
+from typing import Dict, Any, Optional, List, Union
+import logging
 
 logger = logging.getLogger(__name__)
 
 
-def _create_runner(agent_name: str, agent) -> Runner:
-    """
-    Create a Runner with all required services.
-    
-    Args:
-        agent_name: Name for the app
-        agent: The LLM agent instance
-        
-    Returns:
-        Configured Runner instance
-    """
-    return Runner(
-        app_name=agent_name,
-        agent=agent,
-        artifact_service=InMemoryArtifactService(),
-        session_service=InMemorySessionService(),
-        memory_service=InMemoryMemoryService(),
-    )
-
-# Default models for each provider
-DEFAULTS = {
-    "anthropic": "anthropic/claude-3-5-sonnet-20241022",
-    "openai": "gpt-4o-mini",  # GPT-4o-mini (no org verification required)
-    "google": "gemini-2.0-flash-exp",
-}
-
-
-def _auto_model() -> Tuple[str, str]:
-    """
-    Auto-detect provider and model from environment.
-    
-    Returns:
-        (provider, model_id) tuple
-        
-    Raises:
-        RuntimeError: If no API key is found
-    """
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic", os.getenv("ANTHROPIC_MODEL", DEFAULTS["anthropic"])
-    if os.getenv("OPENAI_API_KEY"):
-        return "openai", os.getenv("OPENAI_MODEL", DEFAULTS["openai"])
-    if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
-        return "google", os.getenv("GOOGLE_MODEL", DEFAULTS["google"])
-    raise RuntimeError(
-        "No API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY/GEMINI_API_KEY."
-    )
-
-
-def create_llm_agent(
-    name: str = "assistant",
-    instruction: str = "You are a helpful assistant.",
-    tools: Optional[List[Any]] = None,
-    model: Optional[str] = None,
-    *,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-) -> LlmAgent:
-    """
-    ADK LlmAgent factory with consistent knob propagation across providers.
-    
-    Args:
-        name: Agent name
-        instruction: System instruction
-        tools: Optional tools list
-        model: Optional explicit model override
-        temperature: Sampling temperature (0.0-1.0)
-        max_tokens: Maximum tokens to generate
-        
-    Returns:
-        Configured LlmAgent with consistent settings across providers
-    """
-    provider, detected_model = _auto_model() if model is None else ("explicit", model)
-    
-    # Log selection for debugging
-    debug_parts = [f"provider={provider}", f"model={detected_model}"]
-    if temperature is not None:
-        debug_parts.append(f"temp={temperature}")
-    if max_tokens is not None:
-        debug_parts.append(f"max_tokens={max_tokens}")
-    logger.info(f"LLM agent created: {' '.join(debug_parts)}")
-    
-    # Unified generation config (cover both naming conventions)
-    gen_cfg = {}
-    if temperature is not None:
-        gen_cfg["temperature"] = float(temperature)
-    if max_tokens is not None:
-        gen_cfg["max_tokens"] = int(max_tokens)          # OpenAI/Anthropic style
-        gen_cfg["max_output_tokens"] = int(max_tokens)   # Gemini style
-    
-    # Build provider-specific model handle
-    if provider in ("anthropic", "openai") or detected_model.startswith(("anthropic/", "openai/", "gpt-", "o1-", "o3-")):
-        # LiteLLM wrapper - handles OpenAI models (gpt-*, o1-*, o3-*) and Anthropic
-        model_obj = LiteLlm(
-            model=detected_model,
-        )
-    else:
-        # Gemini native takes model string; LlmAgent will honor generation_config
-        model_obj = detected_model
-    
-    # Create LlmAgent with generation_config (adaptive for different ADK versions)
-    kwargs = dict(
-        name=name,
-        model=model_obj,
-        instruction=instruction,
-        tools=tools or []
-    )
-    
-    if gen_cfg:
-        # Try modern param name first, fall back to older name
-        try:
-            agent = LlmAgent(**kwargs, generation_config=gen_cfg)
-        except (TypeError, Exception) as e:
-            # Log the specific error for debugging (usually just version mismatch)
-            pass  # Silently handle - this is expected with some ADK versions
-            try:
-                agent = LlmAgent(**kwargs, generate_content_config=gen_cfg)
-            except (TypeError, Exception) as e2:
-                logger.debug(f"generate_content_config failed: {e2}")
-                # If neither works, create without config
-                logger.debug("Generation config not supported by this ADK version - using defaults")
-                agent = LlmAgent(**kwargs)
-    else:
-        agent = LlmAgent(**kwargs)
-    
-    return agent
-
-
 async def generate_text(
     prompt: str,
-    system_instruction: str = "You are a helpful AI assistant.",
-    *,
-    tools: Optional[List[Any]] = None,
-    model: Optional[str] = None,
+    system_instruction: Optional[str] = None,
     temperature: float = 0.7,
     max_tokens: int = 1000,
-    timeout: int = 30,
-    max_retries: int = 3,
-) -> str:
+    model: Optional[str] = None
+) -> Optional[str]:
     """
-    Generate text using auto-selected LLM provider with consistent parameters.
+    Generate text using available LLM provider.
     
     Args:
         prompt: Input prompt
-        system_instruction: System instruction for the agent
-        tools: Optional tools list
-        model: Optional explicit model override
-        temperature: Sampling temperature (0.0-1.0)
+        system_instruction: Optional system instruction
+        temperature: Generation temperature (0.0-1.0)
         max_tokens: Maximum tokens to generate
-        timeout: Timeout in seconds
-        max_retries: Maximum retry attempts
+        model: Specific model to use (auto-detected if None)
         
     Returns:
-        Generated text
-        
-    Raises:
-        TimeoutError: If generation times out
-        Exception: If all retries fail
+        Generated text or None if failed
     """
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            # Create agent with explicit parameter propagation
-            agent = create_llm_agent(
-                name="TextGenerator",
-                instruction=system_instruction,
-                tools=tools,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+    try:
+        provider = _detect_llm_provider()
+        
+        if provider == "google":
+            return await _generate_google(prompt, system_instruction, temperature, max_tokens, model)
+        elif provider == "openai":
+            return await _generate_openai(prompt, system_instruction, temperature, max_tokens, model)
+        elif provider == "anthropic":
+            return await _generate_anthropic(prompt, system_instruction, temperature, max_tokens, model)
+        else:
+            logger.error("No LLM provider available")
+            return None
             
-            # Create runner with all required services
-            runner = _create_runner("LLMUtilsAgent", agent)
-            
-            # Create the session first
-            session_service = runner.session_service
-            await session_service.create_session(
-                user_id="user", 
-                session_id="session",
-                app_name="LLMUtilsAgent"
-            )
-            
-            # Run async - new_message needs to be a google.genai.types.Content object
-            # ADK Runner expects parts to be a list of Part objects
-            content = types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
-            
-            logger.debug(f"Running with content: {content}")
-            result = runner.run_async(
-                user_id="user", 
-                session_id="session", 
-                new_message=content
-            )
-            logger.debug(f"Got result type: {type(result)}")
-            
-            chunks = []
-            try:
-                # Result is an async generator
-                async for response in result:
-                    # ADK Event objects have a content attribute with the LLM response
-                    if hasattr(response, "content"):
-                        content = response.content
-                        # The content might be a string directly
-                        if isinstance(content, str):
-                            chunks.append(content)
-                        # Or it might have a text attribute
-                        elif hasattr(content, "text"):
-                            chunks.append(content.text)
-                        # Or parts with text
-                        elif hasattr(content, "parts"):
-                            for part in content.parts:
-                                if hasattr(part, "text"):
-                                    chunks.append(part.text)
-                    elif hasattr(response, "text"):
-                        chunks.append(response.text)
-                    elif isinstance(response, str):
-                        chunks.append(response)
-            finally:
-                # Clean up runner to avoid lingering background tasks with bounded timeout
-                if hasattr(runner, "shutdown"):
-                    try:
-                        # Bounded shutdown with 5-second timeout
-                        await asyncio.wait_for(runner.shutdown(), timeout=5.0)
-                        logger.debug(f"Runner shutdown completed for model={model or detected_model}")
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            f"Runner shutdown timeout after 5s for model={model or detected_model}"
-                        )
-                    except asyncio.CancelledError:
-                        # Use shield to ensure cleanup runs even if cancelled
-                        try:
-                            await asyncio.shield(asyncio.wait_for(runner.shutdown(), timeout=2.0))
-                        except (asyncio.TimeoutError, Exception):
-                            pass
-                        raise  # Re-raise the cancellation
-                    except Exception as e:
-                        # Log unexpected errors but don't fail the whole operation
-                        logger.warning(f"Runner shutdown error: {e}")
-            
-            return "".join(chunks)
-                
-        except asyncio.TimeoutError:
-            last_error = TimeoutError(f"LLM generation timed out after {timeout}s")
-            if attempt < max_retries - 1:
-                wait_time = (2 ** attempt) + random.uniform(0, 1)
-                logger.warning(f"LLM timeout, retry {attempt + 1}/{max_retries} after {wait_time:.1f}s")
-                await asyncio.sleep(wait_time)
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                wait_time = (2 ** attempt) + random.uniform(0, 1)
-                logger.warning(f"LLM error: {e}, retry {attempt + 1}/{max_retries} after {wait_time:.1f}s")
-                await asyncio.sleep(wait_time)
-    
-    raise last_error or Exception("LLM generation failed")
+    except Exception as e:
+        logger.error(f"LLM generation failed: {e}")
+        return None
 
 
 async def generate_json(
     prompt: str,
-    system_instruction: str = "You are a helpful AI assistant that generates valid JSON.",
-    *,
-    tools: Optional[List[Any]] = None,
-    model: Optional[str] = None,
+    schema: Dict[str, Any],
+    system_instruction: Optional[str] = None,
     temperature: float = 0.3,
     max_tokens: int = 1000,
-    timeout: int = 30,
-    max_retries: int = 3,
-    schema: Optional[Dict[str, Any]] = None,
     strict: bool = False,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Generate JSON with automatic repair using auto-selected provider.
+    Generate structured JSON using available LLM provider.
     
     Args:
         prompt: Input prompt
-        system_instruction: System instruction for JSON generation
-        tools: Optional tools list
-        model: Optional explicit model override
-        temperature: Sampling temperature (lower for more consistent JSON)
+        schema: JSON schema for output validation
+        system_instruction: Optional system instruction
+        temperature: Generation temperature (0.0-1.0)
         max_tokens: Maximum tokens to generate
-        timeout: Timeout in seconds
-        max_retries: Maximum retry attempts
-        schema: Optional JSON schema for validation
-        strict: Whether to enforce strict JSON mode
+        strict: Whether to enforce strict schema compliance
+        model: Specific model to use (auto-detected if None)
         
     Returns:
-        Parsed JSON object
-        
-    Raises:
-        json.JSONDecodeError: If JSON repair fails
-        Exception: If generation fails
+        Generated structured data as dictionary
     """
-    # Enhance prompt for JSON generation
-    json_prompt = prompt
-    if strict or schema:
-        json_prompt = f"{prompt}\n\nRespond with valid JSON only, no markdown formatting or explanation."
-    if schema:
-        json_prompt += f"\n\nThe JSON must conform to this schema:\n{json.dumps(schema, indent=2)}"
-    
-    for attempt in range(3):
-        try:
-            # Generate with low temperature for consistency
-            response = await generate_text(
-                prompt=json_prompt,
-                system_instruction=system_instruction,
-                tools=tools,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=timeout,
-                max_retries=max_retries,
-            )
+    try:
+        provider = _detect_llm_provider()
+        
+        if provider == "google":
+            return await _generate_google_json(prompt, schema, system_instruction, temperature, max_tokens, strict, model)
+        elif provider == "openai":
+            return await _generate_openai_json(prompt, schema, system_instruction, temperature, max_tokens, strict, model)
+        elif provider == "anthropic":
+            return await _generate_anthropic_json(prompt, schema, system_instruction, temperature, max_tokens, strict, model)
+        else:
+            logger.error("No LLM provider available")
+            return {"error": "No LLM provider available"}
             
-            # Clean up common JSON formatting issues
-            response = response.replace("\u200b", "").strip()  # Remove zero-width spaces
-            if response.startswith("```json"):
-                response = response[7:]
-            if response.startswith("```"):
-                response = response[3:]
-            if response.endswith("```"):
-                response = response[:-3]
-            
-            # Parse JSON
-            result = json.loads(response.strip())
-            
-            # Validate against schema if provided
-            if schema and strict:
-                # Could add jsonschema validation here if needed
-                pass
-            
-            return result
-            
-        except json.JSONDecodeError as e:
-            if attempt < 2:
-                # Try to repair the JSON
-                json_prompt = f"Fix this invalid JSON and return only the corrected JSON:\n{response}\n\nError: {e}"
-                system_instruction = "You are a JSON repair specialist. Fix the JSON and return only valid JSON."
-                logger.debug(f"JSON parse failed, attempting repair: {e}")
-            else:
-                raise
+    except Exception as e:
+        logger.error(f"LLM JSON generation failed: {e}")
+        return {"error": str(e)}
 
 
-# Backwards compatibility
-class LLMProvider:
-    """Legacy provider class for backwards compatibility."""
-    
-    def __init__(self, provider: str = None, api_key: str = None):
-        """Initialize - provider is ignored, auto-detects from env."""
-        if provider:
-            logger.warning(
-                f"LLMProvider: ignoring provider arg '{provider}'. "
-                f"Provider is now auto-detected from API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY)"
+def _detect_llm_provider() -> Optional[str]:
+    """Detect available LLM provider based on environment variables."""
+    if os.getenv("GOOGLE_API_KEY"):
+        return "google"
+    elif os.getenv("OPENAI_API_KEY"):
+        return "openai"
+    elif os.getenv("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    else:
+        return None
+
+
+async def _generate_google(
+    prompt: str,
+    system_instruction: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    model: Optional[str]
+) -> Optional[str]:
+    """Generate text using Google Gemini."""
+    try:
+        import google.generativeai as genai
+        
+        # Configure API key
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return None
+            
+        genai.configure(api_key=api_key)
+        
+        # Select model
+        model_name = model or "gemini-1.5-flash"
+        
+        # Configure generation
+        generation_config = {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+        }
+        
+        # Create model instance
+        if system_instruction:
+            model_instance = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config=generation_config,
+                system_instruction=system_instruction
             )
+        else:
+            model_instance = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config=generation_config
+            )
+        
+        # Generate content
+        response = await model_instance.generate_content_async(prompt)
+        
+        if response and response.text:
+            return response.text
+        else:
+            return None
+            
+    except ImportError:
+        logger.warning("Google Generative AI not available")
+        return None
+    except Exception as e:
+        logger.error(f"Google generation failed: {e}")
+        return None
+
+
+async def _generate_google_json(
+    prompt: str,
+    schema: Dict[str, Any],
+    system_instruction: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    strict: bool,
+    model: Optional[str]
+) -> Dict[str, Any]:
+    """Generate structured JSON using Google Gemini."""
+    try:
+        import google.generativeai as genai
+        from google.generativeai.types import GenerationConfig
+        
+        # Configure API key
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return {"error": "Google API key not available"}
+            
+        genai.configure(api_key=api_key)
+        
+        # Select model
+        model_name = model or "gemini-1.5-flash"
+        
+        # Enhanced prompt for JSON generation
+        json_prompt = f"""{prompt}
+
+Please respond with valid JSON that follows this schema:
+{json.dumps(schema, indent=2)}
+
+IMPORTANT: Your response must be valid JSON only, no other text."""
+        
+        if system_instruction:
+            json_prompt = f"{system_instruction}\n\n{json_prompt}"
+        
+        # Configure generation
+        generation_config = GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json" if strict else None,
+            response_schema=schema if strict else None
+        )
+        
+        # Create model instance
+        model_instance = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=generation_config
+        )
+        
+        # Generate content
+        response = await model_instance.generate_content_async(json_prompt)
+        
+        if response and response.text:
+            try:
+                return json.loads(response.text)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON response: {e}")
+                return {"error": "Invalid JSON response", "raw_response": response.text}
+        else:
+            return {"error": "No response generated"}
+            
+    except ImportError:
+        logger.warning("Google Generative AI not available")
+        return {"error": "Google Generative AI not available"}
+    except Exception as e:
+        logger.error(f"Google JSON generation failed: {e}")
+        return {"error": str(e)}
+
+
+async def _generate_openai(
+    prompt: str,
+    system_instruction: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    model: Optional[str]
+) -> Optional[str]:
+    """Generate text using OpenAI."""
+    try:
+        import openai
+        
+        # Configure API key
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return None
+            
+        client = openai.AsyncOpenAI(api_key=api_key)
+        
+        # Select model
+        model_name = model or "gpt-3.5-turbo"
+        
+        # Prepare messages
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        
+        # Generate content
+        response = await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        
+        if response.choices and response.choices[0].message.content:
+            return response.choices[0].message.content
+        else:
+            return None
+            
+    except ImportError:
+        logger.warning("OpenAI not available")
+        return None
+    except Exception as e:
+        logger.error(f"OpenAI generation failed: {e}")
+        return None
+
+
+async def _generate_openai_json(
+    prompt: str,
+    schema: Dict[str, Any],
+    system_instruction: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    strict: bool,
+    model: Optional[str]
+) -> Dict[str, Any]:
+    """Generate structured JSON using OpenAI."""
+    try:
+        import openai
+        
+        # Configure API key
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return {"error": "OpenAI API key not available"}
+            
+        client = openai.AsyncOpenAI(api_key=api_key)
+        
+        # Select model
+        model_name = model or "gpt-3.5-turbo"
+        
+        # Enhanced prompt for JSON generation
+        json_prompt = f"""{prompt}
+
+Please respond with valid JSON that follows this schema:
+{json.dumps(schema, indent=2)}
+
+IMPORTANT: Your response must be valid JSON only, no other text."""
+        
+        # Prepare messages
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": json_prompt})
+        
+        # Configure response format
+        response_format = {"type": "json_object"} if strict else None
+        
+        # Generate content
+        response = await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format
+        )
+        
+        if response.choices and response.choices[0].message.content:
+            try:
+                return json.loads(response.choices[0].message.content)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON response: {e}")
+                return {"error": "Invalid JSON response", "raw_response": response.choices[0].message.content}
+        else:
+            return {"error": "No response generated"}
+            
+    except ImportError:
+        logger.warning("OpenAI not available")
+        return {"error": "OpenAI not available"}
+    except Exception as e:
+        logger.error(f"OpenAI JSON generation failed: {e}")
+        return {"error": str(e)}
+
+
+async def _generate_anthropic(
+    prompt: str,
+    system_instruction: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    model: Optional[str]
+) -> Optional[str]:
+    """Generate text using Anthropic Claude."""
+    try:
+        import anthropic
+        
+        # Configure API key
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            return None
+            
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        
+        # Select model
+        model_name = model or "claude-3-haiku-20240307"
+        
+        # Generate content
+        response = await client.messages.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            system=system_instruction,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        
+        if response.content and response.content[0].text:
+            return response.content[0].text
+        else:
+            return None
+            
+    except ImportError:
+        logger.warning("Anthropic not available")
+        return None
+    except Exception as e:
+        logger.error(f"Anthropic generation failed: {e}")
+        return None
+
+
+async def _generate_anthropic_json(
+    prompt: str,
+    schema: Dict[str, Any],
+    system_instruction: Optional[str],
+    temperature: float,
+    max_tokens: int,
+    strict: bool,
+    model: Optional[str]
+) -> Dict[str, Any]:
+    """Generate structured JSON using Anthropic Claude."""
+    try:
+        import anthropic
+        
+        # Configure API key
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            return {"error": "Anthropic API key not available"}
+            
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        
+        # Select model
+        model_name = model or "claude-3-haiku-20240307"
+        
+        # Enhanced prompt for JSON generation
+        json_prompt = f"""{prompt}
+
+Please respond with valid JSON that follows this schema:
+{json.dumps(schema, indent=2)}
+
+IMPORTANT: Your response must be valid JSON only, no other text."""
+        
+        # Generate content
+        response = await client.messages.create(
+            model=model_name,
+            messages=[{"role": "user", "content": json_prompt}],
+            system=system_instruction,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        
+        if response.content and response.content[0].text:
+            try:
+                return json.loads(response.content[0].text)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON response: {e}")
+                return {"error": "Invalid JSON response", "raw_response": response.content[0].text}
+        else:
+            return {"error": "No response generated"}
+            
+    except ImportError:
+        logger.warning("Anthropic not available")
+        return {"error": "Anthropic not available"}
+    except Exception as e:
+        logger.error(f"Anthropic JSON generation failed: {e}")
+        return {"error": str(e)}
+
+
+def get_available_providers() -> List[str]:
+    """Get list of available LLM providers."""
+    providers = []
     
-    async def generate_text(self, prompt: str, **kwargs) -> str:
-        """Generate text using auto-detected provider."""
-        # Map legacy kwargs to new names
-        if 'max_output_tokens' in kwargs:
-            kwargs['max_tokens'] = kwargs.pop('max_output_tokens')
-        return await generate_text(prompt, **kwargs)
+    if os.getenv("GOOGLE_API_KEY"):
+        providers.append("google")
+    if os.getenv("OPENAI_API_KEY"):
+        providers.append("openai")
+    if os.getenv("ANTHROPIC_API_KEY"):
+        providers.append("anthropic")
     
-    async def generate_json(self, prompt: str, **kwargs) -> Dict[str, Any]:
-        """Generate JSON using auto-detected provider."""
-        # Map legacy kwargs to new names
-        if 'max_output_tokens' in kwargs:
-            kwargs['max_tokens'] = kwargs.pop('max_output_tokens')
-        return await generate_json(prompt, **kwargs)
+    return providers
+
+
+async def test_provider(provider: str) -> bool:
+    """Test if a specific provider is working."""
+    try:
+        if provider == "google":
+            result = await _generate_google("Say 'OK'", None, 0.1, 10, None)
+        elif provider == "openai":
+            result = await _generate_openai("Say 'OK'", None, 0.1, 10, None)
+        elif provider == "anthropic":
+            result = await _generate_anthropic("Say 'OK'", None, 0.1, 10, None)
+        else:
+            return False
+        
+        return result is not None and "ok" in result.lower()
+        
+    except Exception as e:
+        logger.error(f"Provider {provider} test failed: {e}")
+        return False

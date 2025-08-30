@@ -1,327 +1,466 @@
 """
-Enhanced A2A client with JSON-RPC support and production features.
-~210 LOC - Production-ready client with retry, auth, and debug logging.
-Uses JSON-RPC protocol to match A2AStarletteApplication server.
+A2A Client for Inter-Agent Communication
+Health Universe compatible client for A2A protocol communication.
 """
 
-import os
 import json
-import time
-import random
-import logging
+import uuid
+import os
 import asyncio
-import aiohttp
-import itertools
-from typing import Dict, Any, Optional
-from contextlib import asynccontextmanager
+from typing import Dict, Any, Optional, Union, List
+import logging
+
+import httpx
+from a2a.types import Message, TextPart, DataPart
 
 
 logger = logging.getLogger(__name__)
 
-# Global counter for JSON-RPC request IDs
-_jsonrpc_id_counter = itertools.count(1)
-
-
-def _jsonrpc_envelope(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Create a JSON-RPC 2.0 request envelope.
-    
-    Args:
-        method: The RPC method name (e.g., "message", "task.create")
-        params: The method parameters
-        
-    Returns:
-        JSON-RPC request dictionary
-    """
-    return {
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params,
-        "id": next(_jsonrpc_id_counter)
-    }
-
 
 class A2AClient:
-    """Enhanced A2A client with JSON-RPC and DataPart support."""
+    """
+    A2A-compliant client for inter-agent communication.
+    Optimized for Health Universe deployment patterns.
+    """
     
-    def __init__(self, base_url: str, token: Optional[str] = None):
+    def __init__(self, base_url: str, timeout: float = 30.0):
         """
         Initialize A2A client.
         
         Args:
-            base_url: Base URL for the A2A server (no /a2a/v1 suffix for JSON-RPC)
-            token: Optional bearer token for authentication
+            base_url: Base URL of the target agent
+            timeout: Default timeout for requests
         """
         self.base_url = base_url.rstrip('/')
-        self.token = token or os.getenv("AGENT_TOKEN")
-        self.debug_payloads = os.getenv("DEBUG_PAYLOADS") == "1"
-        self.session = None
+        self.timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
         
-    @classmethod
-    def from_registry(cls, agent_name: str, token: Optional[str] = None):
+        # Detect Health Universe endpoints
+        self.is_health_universe = "healthuniverse.com" in base_url or "apps.healthuniverse.com" in base_url
+        
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create HTTP client."""
+        if self._client is None:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "A2A-Client/1.0"
+            }
+            
+            # Add Health Universe specific headers if needed
+            if self.is_health_universe:
+                headers["Accept-Encoding"] = "gzip, deflate"
+                
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout),
+                headers=headers,
+                follow_redirects=True
+            )
+            
+        return self._client
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+    
+    async def send_message(self, message: str, timeout_sec: Optional[float] = None) -> Any:
         """
-        Create client from registry.
+        Send a text message to the agent.
+        
+        Args:
+            message: Text message to send
+            timeout_sec: Optional timeout override
+            
+        Returns:
+            Agent response
+        """
+        # Create proper A2A message structure
+        a2a_message = Message(
+            role="user",
+            parts=[TextPart(kind="text", text=message)],
+            messageId=str(uuid.uuid4()),
+            kind="message"
+        )
+        
+        return await self._send_a2a_request(a2a_message, timeout_sec)
+    
+    async def send_data(self, data: Union[Dict, List, Any], timeout_sec: Optional[float] = None) -> Any:
+        """
+        Send structured data to the agent.
+        
+        Args:
+            data: Structured data to send
+            timeout_sec: Optional timeout override
+            
+        Returns:
+            Agent response
+        """
+        # Create proper A2A message structure with DataPart
+        a2a_message = Message(
+            role="user",
+            parts=[DataPart(kind="data", data=data)],
+            messageId=str(uuid.uuid4()),
+            kind="message"
+        )
+        
+        return await self._send_a2a_request(a2a_message, timeout_sec)
+    
+    async def send_a2a_message(self, message: Message, timeout_sec: Optional[float] = None) -> Any:
+        """
+        Send a complete A2A Message object.
+        
+        Args:
+            message: A2A Message object
+            timeout_sec: Optional timeout override
+            
+        Returns:
+            Agent response
+        """
+        return await self._send_a2a_request(message, timeout_sec)
+    
+    async def _send_a2a_request(self, message: Message, timeout_sec: Optional[float] = None) -> Any:
+        """
+        Send A2A request using JSON-RPC protocol.
+        
+        Args:
+            message: A2A Message object
+            timeout_sec: Optional timeout override
+            
+        Returns:
+            Parsed response
+        """
+        client = await self._get_client()
+        
+        # Update client timeout if specified
+        if timeout_sec:
+            client.timeout = httpx.Timeout(timeout_sec)
+        
+        # Create JSON-RPC request envelope
+        request_payload = {
+            "jsonrpc": "2.0",
+            "method": "message/send",
+            "params": {
+                "message": self._message_to_dict(message)
+            },
+            "id": str(uuid.uuid4())
+        }
+        
+        try:
+            logger.debug(f"Sending A2A request to {self.base_url}")
+            
+            # Health Universe typically uses root endpoint with JSON-RPC
+            endpoint = self.base_url
+            
+            response = await client.post(
+                endpoint,
+                json=request_payload
+            )
+            
+            response.raise_for_status()
+            response_data = response.json()
+            
+            # Handle JSON-RPC response
+            if "error" in response_data:
+                error = response_data["error"]
+                raise Exception(f"A2A Error {error.get('code', 'unknown')}: {error.get('message', 'Unknown error')}")
+            
+            if "result" not in response_data:
+                raise Exception("Invalid JSON-RPC response: missing result")
+            
+            result = response_data["result"]
+            return self._parse_response(result)
+            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error calling {self.base_url}: {e}")
+            if e.response.status_code == 403:
+                raise Exception("Access forbidden - check if agent is public or authentication is required")
+            elif e.response.status_code == 404:
+                raise Exception("Agent endpoint not found - check URL and transport protocol")
+            else:
+                raise Exception(f"HTTP {e.response.status_code}: {e.response.text}")
+        except httpx.RequestError as e:
+            logger.error(f"Request error calling {self.base_url}: {e}")
+            raise Exception(f"Network error: {str(e)}")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            raise Exception("Invalid JSON response from agent")
+        except Exception as e:
+            logger.error(f"Unexpected error calling {self.base_url}: {e}")
+            raise
+    
+    def _message_to_dict(self, message: Message) -> Dict[str, Any]:
+        """Convert Message object to dictionary."""
+        # Handle both Pydantic models and regular objects
+        if hasattr(message, 'model_dump'):
+            return message.model_dump()
+        elif hasattr(message, 'dict'):
+            return message.dict()
+        else:
+            # Fallback for dictionary-like objects
+            return {
+                "role": getattr(message, 'role', 'user'),
+                "parts": self._parts_to_dict(getattr(message, 'parts', [])),
+                "messageId": getattr(message, 'messageId', str(uuid.uuid4())),
+                "kind": "message"
+            }
+    
+    def _parts_to_dict(self, parts: List[Any]) -> List[Dict[str, Any]]:
+        """Convert Parts to dictionary format."""
+        result = []
+        
+        for part in parts:
+            if hasattr(part, 'model_dump'):
+                result.append(part.model_dump())
+            elif hasattr(part, 'dict'):
+                result.append(part.dict())
+            elif isinstance(part, dict):
+                result.append(part)
+            else:
+                # Fallback - try to extract common attributes
+                part_dict = {"kind": getattr(part, 'kind', 'text')}
+                
+                if hasattr(part, 'text'):
+                    part_dict["text"] = part.text
+                elif hasattr(part, 'data'):
+                    part_dict["data"] = part.data
+                elif hasattr(part, 'file'):
+                    part_dict["file"] = part.file
+                
+                result.append(part_dict)
+                
+        return result
+    
+    def _parse_response(self, result: Any) -> Any:
+        """
+        Parse A2A response and extract relevant content.
+        
+        Args:
+            result: Raw result from JSON-RPC response
+            
+        Returns:
+            Parsed content
+        """
+        # Handle different response formats
+        
+        # Case 1: Direct Message response
+        if isinstance(result, dict) and result.get("kind") == "message":
+            return self._extract_message_content(result)
+        
+        # Case 2: Task response
+        elif isinstance(result, dict) and result.get("kind") == "task":
+            return self._extract_task_content(result)
+        
+        # Case 3: Direct string response
+        elif isinstance(result, str):
+            return result
+        
+        # Case 4: Raw dictionary - try to extract meaningful content
+        elif isinstance(result, dict):
+            # Look for message in status
+            if "status" in result and isinstance(result["status"], dict):
+                status_msg = result["status"].get("message")
+                if status_msg:
+                    return self._extract_message_content(status_msg)
+            
+            # Look for direct message field
+            if "message" in result:
+                return self._extract_message_content(result["message"])
+            
+            # Look for text field (simplified response)
+            if "text" in result:
+                return result["text"]
+            
+            # Return the whole thing if nothing else matches
+            return result
+        
+        # Default: return as-is
+        else:
+            return result
+    
+    def _extract_message_content(self, message: Dict[str, Any]) -> Union[str, Dict, List]:
+        """
+        Extract content from A2A Message structure.
+        
+        Args:
+            message: Message dictionary
+            
+        Returns:
+            Extracted content
+        """
+        if not isinstance(message, dict):
+            return str(message)
+        
+        parts = message.get("parts", [])
+        if not parts:
+            return ""
+        
+        # Extract content from all parts
+        texts = []
+        data_parts = []
+        
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+                
+            kind = part.get("kind")
+            if kind == "text":
+                text = part.get("text")
+                if text:
+                    texts.append(str(text))
+            elif kind == "data":
+                data = part.get("data")
+                if data is not None:
+                    data_parts.append(data)
+        
+        # Return structured data if present, otherwise text
+        if data_parts:
+            return data_parts[0] if len(data_parts) == 1 else data_parts
+        elif texts:
+            return "\n".join(texts)
+        else:
+            return ""
+    
+    def _extract_task_content(self, task: Dict[str, Any]) -> Union[str, Dict, List]:
+        """
+        Extract content from A2A Task structure.
+        
+        Args:
+            task: Task dictionary
+            
+        Returns:
+            Extracted content
+        """
+        # Try to get content from task status message
+        status = task.get("status", {})
+        if isinstance(status, dict):
+            status_message = status.get("message")
+            if status_message:
+                return self._extract_message_content(status_message)
+        
+        # Try to get content from artifacts
+        artifacts = task.get("artifacts", [])
+        if artifacts:
+            # Use first artifact
+            artifact = artifacts[0]
+            if isinstance(artifact, dict):
+                parts = artifact.get("parts", [])
+                if parts:
+                    return self._extract_content_from_parts(parts)
+        
+        # Fallback to task itself
+        return task
+    
+    def _extract_content_from_parts(self, parts: List[Dict[str, Any]]) -> Union[str, Dict, List]:
+        """Extract content from parts list."""
+        texts = []
+        data_parts = []
+        
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+                
+            kind = part.get("kind")
+            if kind == "text":
+                text = part.get("text")
+                if text:
+                    texts.append(str(text))
+            elif kind == "data":
+                data = part.get("data")
+                if data is not None:
+                    data_parts.append(data)
+        
+        if data_parts:
+            return data_parts[0] if len(data_parts) == 1 else data_parts
+        elif texts:
+            return "\n".join(texts)
+        else:
+            return ""
+    
+    @classmethod
+    def from_registry(cls, agent_name: str, registry_path: str = "config/agents.json") -> "A2AClient":
+        """
+        Create A2A client from agent registry.
         
         Args:
             agent_name: Name of agent in registry
-            token: Optional bearer token
+            registry_path: Path to agent registry file
             
         Returns:
-            A2AClient instance
+            Configured A2AClient
             
         Raises:
             ValueError: If agent not found in registry
         """
-        from .registry import resolve_agent_url
-        return cls(resolve_agent_url(agent_name), token)
-        
-    @asynccontextmanager
-    async def _get_session(self):
-        """Get or create aiohttp session."""
-        if self.session is None:
-            headers = {"Content-Type": "application/json"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
-            self.session = aiohttp.ClientSession(headers=headers)
         try:
-            yield self.session
-        finally:
-            pass
-    
-    async def close(self):
-        """Close the session."""
-        if self.session:
-            await self.session.close()
-            self.session = None
-    
-    async def _request_jsonrpc(self, method: str, params: Dict[str, Any], 
-                               retries: int = 3, timeout_sec: Optional[float] = None) -> Any:
-        """
-        Make JSON-RPC request with retries.
-        
-        Args:
-            method: JSON-RPC method name
-            params: Method parameters
-            retries: Number of retry attempts
-            timeout_sec: Request timeout in seconds
+            # Try to load registry
+            if os.path.exists(registry_path):
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+            else:
+                raise ValueError(f"Agent registry not found: {registry_path}")
             
+            # Look up agent
+            agents = registry.get("agents", {})
+            if agent_name not in agents:
+                raise ValueError(f"Agent '{agent_name}' not found in registry")
+            
+            agent_config = agents[agent_name]
+            agent_url = agent_config.get("url")
+            
+            if not agent_url:
+                raise ValueError(f"No URL configured for agent '{agent_name}'")
+            
+            return cls(agent_url)
+            
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in registry file: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to load agent registry: {e}")
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Perform health check on target agent.
+        
         Returns:
-            The result from the JSON-RPC response
+            Health status information
+        """
+        try:
+            # Try to get agent card first
+            client = await self._get_client()
             
-        Raises:
-            aiohttp.ClientError: On network errors
-            ValueError: On JSON-RPC errors
-        """
-        endpoint = self.base_url  # JSON-RPC posts to root
-        payload = _jsonrpc_envelope(method, params)
-        
-        if self.debug_payloads:
-            logger.debug(f"JSON-RPC Request to {endpoint}:")
-            logger.debug(json.dumps(payload, indent=2))
-        
-        for attempt in range(retries):
-            try:
-                async with self._get_session() as session:
-                    timeout = aiohttp.ClientTimeout(total=timeout_sec or 30.0)
-                    
-                    async with session.post(endpoint, json=payload, timeout=timeout) as response:
-                        response_text = await response.text()
-                        
-                        if self.debug_payloads:
-                            logger.debug(f"JSON-RPC Response ({response.status}):")
-                            logger.debug(response_text[:1000])
-                        
-                        if response.status >= 400:
-                            if attempt < retries - 1:
-                                await asyncio.sleep(2 ** attempt + random.random())
-                                continue
-                            raise aiohttp.ClientResponseError(
-                                request_info=response.request_info,
-                                history=response.history,
-                                status=response.status,
-                                message=f"JSON-RPC request failed: {response_text}"
-                            )
-                        
-                        # Parse JSON-RPC response
-                        try:
-                            data = json.loads(response_text)
-                        except json.JSONDecodeError:
-                            raise ValueError(f"Invalid JSON response: {response_text[:200]}")
-                        
-                        # Check for JSON-RPC error
-                        if "error" in data:
-                            error = data["error"]
-                            raise ValueError(f"JSON-RPC error {error.get('code')}: {error.get('message')}")
-                        
-                        # Return the result
-                        return data.get("result", data)
-                        
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                if attempt < retries - 1:
-                    logger.warning(f"Request failed (attempt {attempt + 1}/{retries}): {e}")
-                    await asyncio.sleep(2 ** attempt + random.random())
-                else:
-                    raise
-    
-    async def send_message(self, message: Any, timeout_sec: Optional[float] = None) -> str:
-        """
-        Send a message to the agent via JSON-RPC.
-        
-        Args:
-            message: Message object or dict with role and parts
-            timeout_sec: Request timeout
+            # Check well-known agent card endpoint
+            card_url = f"{self.base_url}/.well-known/agentcard.json"
+            response = await client.get(card_url)
             
-        Returns:
-            Text response from agent
-        """
-        # Convert message to dict if needed
-        if hasattr(message, 'model_dump'):
-            message_dict = message.model_dump()
-        elif hasattr(message, 'dict'):
-            message_dict = message.dict()
-        else:
-            message_dict = message
-        
-        # Ensure message has required structure
-        if not isinstance(message_dict, dict):
-            message_dict = {
-                "role": "user",
-                "parts": [{"kind": "text", "text": str(message_dict)}],
-                "kind": "message"
-            }
-        elif "role" not in message_dict:
-            message_dict = {
-                "role": "user",
-                "parts": [{"kind": "text", "text": str(message_dict)}],
-                "kind": "message"
-            }
-        
-        # Add messageId if not present
-        if "messageId" not in message_dict:
-            import uuid
-            message_dict["messageId"] = str(uuid.uuid4())
-        
-        # Send via JSON-RPC with correct method name
-        params = {
-            "message": message_dict,
-            "metadata": {}
-        }
-        
-        result = await self._request_jsonrpc("message/send", params, timeout_sec=timeout_sec)
-        
-        # Extract text from various response formats
-        if isinstance(result, str):
-            return result
-        
-        if isinstance(result, dict):
-            # Direct text field
-            if "text" in result:
-                return result["text"]
-            
-            # Message with parts
-            msg = result.get("message") or result.get("result", {}).get("message")
-            if isinstance(msg, dict):
-                parts = msg.get("parts", [])
-                texts = []
-                for part in parts:
-                    if part.get("kind") == "text":
-                        texts.append(part.get("text", ""))
-                    elif part.get("kind") == "data":
-                        # Handle DataPart responses
-                        data = part.get("data", {})
-                        if isinstance(data, dict):
-                            texts.append(json.dumps(data, indent=2))
-                        else:
-                            texts.append(str(data))
-                return "\n".join(texts)
-        
-        return str(result)
-    
-    async def send_data(self, data: Any, timeout_sec: Optional[float] = None) -> Any:
-        """
-        Send structured data to the agent using DataPart.
-        
-        This method properly formats structured data as a DataPart
-        with kind="data", ensuring compatibility with agents that
-        expect structured data in the data field rather than as
-        serialized JSON text.
-        
-        Args:
-            data: Structured data (dict, list, etc.) to send
-            timeout_sec: Request timeout
-            
-        Returns:
-            Response from agent (structured or text)
-        """
-        import uuid
-        
-        # Create message with DataPart for structured data
-        message_dict = {
-            "role": "user",
-            "parts": [{"kind": "data", "data": data}],
-            "kind": "message",
-            "messageId": str(uuid.uuid4())
-        }
-        
-        # Send via JSON-RPC
-        params = {
-            "message": message_dict,
-            "metadata": {}
-        }
-        
-        result = await self._request_jsonrpc("message/send", params, timeout_sec=timeout_sec)
-        
-        # Try to extract structured data from response
-        if isinstance(result, dict):
-            # Check for message with DataPart
-            msg = result.get("message") or result.get("result", {}).get("message")
-            if isinstance(msg, dict):
-                parts = msg.get("parts", [])
-                for part in parts:
-                    if part.get("kind") == "data":
-                        return part.get("data")
+            if response.status_code == 200:
+                agent_card = response.json()
+                return {
+                    "status": "healthy",
+                    "agent_name": agent_card.get("name", "Unknown"),
+                    "protocol_version": agent_card.get("protocolVersion", "Unknown"),
+                    "capabilities": agent_card.get("capabilities", {}),
+                    "agent_card_accessible": True
+                }
+            else:
+                return {
+                    "status": "degraded",
+                    "error": f"Agent card not accessible (HTTP {response.status_code})",
+                    "agent_card_accessible": False
+                }
                 
-                # Fall back to text parts
-                texts = []
-                for part in parts:
-                    if part.get("kind") == "text":
-                        text = part.get("text", "")
-                        # Try to parse as JSON if it looks like JSON
-                        if text.strip().startswith(("{", "[")):
-                            try:
-                                return json.loads(text)
-                            except json.JSONDecodeError:
-                                pass
-                        texts.append(text)
-                
-                if texts:
-                    combined = "\n".join(texts)
-                    # Try to parse combined text as JSON
-                    if combined.strip().startswith(("{", "[")):
-                        try:
-                            return json.loads(combined)
-                        except json.JSONDecodeError:
-                            pass
-                    return combined
-        
-        return result
-
-
-# Convenience function for backwards compatibility
-async def call_agent(agent_url: str, message: str, timeout: float = 30.0) -> str:
-    """
-    Call an agent with a simple text message.
-    
-    Args:
-        agent_url: Agent URL or name (resolved via registry)
-        message: Text message to send
-        timeout: Request timeout in seconds
-        
-    Returns:
-        Agent's text response
-    """
-    client = A2AClient.from_registry(agent_url) if not agent_url.startswith("http") else A2AClient(agent_url)
-    try:
-        return await client.send_message(message, timeout_sec=timeout)
-    finally:
-        await client.close()
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "agent_card_accessible": False
+            }
