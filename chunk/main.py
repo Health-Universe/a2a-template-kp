@@ -91,7 +91,7 @@ if __name__ == "__main__":
     
     # Run the server
     uvicorn.run(
-        "chunk.main:app" if reload else app,
+        app,
         host=host,
         port=port,
         reload=reload,
