@@ -9,23 +9,21 @@ import sys
 from pathlib import Path
 
 # Add parent directories to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import uvicorn
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from utils.logging import get_logger, setup_logging
-from examples.pipeline.summarize.summarize_agent import SummarizeAgent
+from utils.logging import get_logger
+from summarize.agent import DocumentSummarizerAgent
 
-# Setup logging first
-setup_logging()
 logger = get_logger(__name__)
 
 def create_app():
     """Create the Starlette application with A2A endpoints."""
     # Instantiate the agent
-    agent = SummarizeAgent()
+    agent = DocumentSummarizerAgent()
     logger.info(f"Initializing {agent.get_agent_name()} v{agent.get_agent_version()}")
     
     # Build Agent Card + handler
@@ -49,7 +47,7 @@ app, agent = create_app()
 
 if __name__ == "__main__":
     # Configuration from environment
-    port = int(os.getenv("PORT", os.getenv("AGENT_PORT", "8104")))
+    port = int(os.getenv("PORT", "8005"))
     host = os.getenv("HOST", "0.0.0.0")
     reload = os.getenv("RELOAD", "false").lower() == "true"
     
@@ -81,7 +79,7 @@ if __name__ == "__main__":
     
     # Run the server
     uvicorn.run(
-        "examples.pipeline.summarize.main:app" if reload else app,
+        "summarize.main:app" if reload else app,
         host=host,
         port=port,
         reload=reload,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for the Pattern Search (Grep) Agent.
+Main entry point for the Document Search Agent.
 Starts an A2A-compliant HTTP server with all required endpoints.
 """
 
@@ -9,23 +9,21 @@ import sys
 from pathlib import Path
 
 # Add parent directories to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import uvicorn
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from utils.logging import get_logger, setup_logging
-from examples.pipeline.grep.agent import GrepAgent
+from utils.logging import get_logger
+from grep.agent import DocumentSearchAgent
 
-# Setup logging first
-setup_logging()
 logger = get_logger(__name__)
 
 def create_app():
     """Create the Starlette application with A2A endpoints."""
     # Instantiate the agent
-    agent = GrepAgent()
+    agent = DocumentSearchAgent()
     logger.info(f"Initializing {agent.get_agent_name()} v{agent.get_agent_version()}")
     
     # Build Agent Card + handler
@@ -49,7 +47,7 @@ app, agent = create_app()
 
 if __name__ == "__main__":
     # Configuration from environment
-    port = int(os.getenv("PORT", os.getenv("AGENT_PORT", "8102")))
+    port = int(os.getenv("PORT", "8003"))
     host = os.getenv("HOST", "0.0.0.0")
     reload = os.getenv("RELOAD", "false").lower() == "true"
     
@@ -85,7 +83,7 @@ if __name__ == "__main__":
     
     # Run the server
     uvicorn.run(
-        "examples.pipeline.grep.main:app" if reload else app,
+        "grep.main:app" if reload else app,
         host=host,
         port=port,
         reload=reload,
