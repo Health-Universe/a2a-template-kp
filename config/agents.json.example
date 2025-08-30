@@ -1,0 +1,68 @@
+{
+  "_comment": "IMPORTANT: Health Universe Deployment Process",
+  "_deployment_steps": [
+    "1. Deploy all individual agents to Health Universe first",
+    "2. Each agent will get a unique xxx-xxx-xxx code (e.g., vey-vou-nam)",
+    "3. The agent URL format is: https://apps.healthuniverse.com/xxx-xxx-xxx",
+    "4. Update this file with the actual agent IDs and URLs",
+    "5. Rename this file from agents.json.example to agents.json",
+    "6. Commit and push changes to Git",
+    "7. Deploy the orchestrator agent",
+    "8. The orchestrator will read this config at startup"
+  ],
+  "_note": "Each agent runs in its own Kubernetes container and cannot modify this file at runtime",
+  "agents": {
+    "keyword": {
+      "url": "https://apps.healthuniverse.com/xxx-xxx-xxx",
+      "name": "Keyword Generator Agent",
+      "description": "Generates relevant search keywords and patterns from documents.",
+      "skills": ["generate_keywords"],
+      "_replace_with": "Replace xxx-xxx-xxx with actual agent ID from Health Universe (e.g., key-wrd-gen)"
+    },
+    "grep": {
+      "url": "https://apps.healthuniverse.com/yyy-yyy-yyy",
+      "name": "Document Search Agent",
+      "description": "Searches documents using keywords and patterns to find relevant content.",
+      "skills": ["search_document"],
+      "_replace_with": "Replace yyy-yyy-yyy with actual agent ID from Health Universe (e.g., doc-srch-grp)"
+    },
+    "chunk": {
+      "url": "https://apps.healthuniverse.com/zzz-zzz-zzz",
+      "name": "Content Chunk Extractor",
+      "description": "Extracts contextual chunks around search matches for further analysis.",
+      "skills": ["extract_chunks"],
+      "_replace_with": "Replace zzz-zzz-zzz with actual agent ID from Health Universe (e.g., cnt-chnk-ext)"
+    },
+    "summarizer": {
+      "url": "https://apps.healthuniverse.com/www-www-www",
+      "name": "Document Summarizer",
+      "description": "Analyzes content chunks and generates comprehensive summaries.",
+      "skills": ["summarize_content"],
+      "_replace_with": "Replace www-www-www with actual agent ID from Health Universe (e.g., doc-sum-anl)"
+    }
+  },
+  "_local_development": {
+    "comment": "For local development, you can use localhost URLs",
+    "example": {
+      "keyword": {
+        "url": "http://localhost:8002"
+      },
+      "grep": {
+        "url": "http://localhost:8003"
+      },
+      "chunk": {
+        "url": "http://localhost:8004"
+      },
+      "summarizer": {
+        "url": "http://localhost:8005"
+      }
+    }
+  },
+  "_health_universe_notes": {
+    "transport": "Most Health Universe agents use JSON-RPC on root endpoint",
+    "authentication": "Private apps require proper authentication headers",
+    "testing": "Make apps public during development/testing phase",
+    "agent_card": "Each agent must serve /.well-known/agentcard.json",
+    "deployment": "Use module-level app variable for proper discovery"
+  }
+}

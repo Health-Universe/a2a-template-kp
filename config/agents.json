@@ -1,0 +1,19 @@
+{
+  "agents": {
+    "keyword": {
+      "url": "https://apps.healthuniverse.com/aqt-iaj-val"
+    },
+    "grep": {
+      "url": "https://apps.healthuniverse.com/noj-pue-nqe"
+    },
+    "chunk": {
+      "url": "https://apps.healthuniverse.com/fff-gab-lmy"
+    },
+    "summarize": {
+      "url": "https://apps.healthuniverse.com/ncc-epu-rfk"
+    },
+    "simple_orchestrator": {
+      "url": "https://apps.healthuniverse.com/jmi-umj-lwx"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "agents": {
+    "orchestrator": {
+      "url": "https://apps.healthuniverse.com/omj-cuu-rdv"
+    },
+    "keyword": {
+      "url": "https://apps.healthuniverse.com/uad-nmu-ifv"
+    },
+    "grep": {
+      "url": "https://apps.healthuniverse.com/tfi-zlr-ygy"
+    },
+    "chunk": {
+      "url": "https://apps.healthuniverse.com/mgd-hyk-cbr"
+    },
+    "summarize": {
+      "url": "https://apps.healthuniverse.com/ehc-xve-thr"
+    }
+  }
+}
